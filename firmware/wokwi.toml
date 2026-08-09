@@ -1,4 +1,0 @@
-[wokwi]
-version = 1
-firmware = 'build/agritwin.ino.hex'
-elf = 'build/agritwin.ino.elf'
