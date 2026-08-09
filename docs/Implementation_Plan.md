@@ -8,7 +8,7 @@
 
 ## 1. Review
 
-**What's strong:** the layering is genuinely correct — hardware → FastAPI → MCP → LLM → Unity/AR, with the backend as single source of truth and the LLM only touching MCP tools. The API-first parallelism note in §11 is the right instinct. The 5-tool MCP surface in §5 is well-scoped.
+**What's strong:** the layering is genuinely correct — hardware → FastAPI → MCP → LLM → Unity, with the backend as single source of truth and the LLM only touching MCP tools. The API-first parallelism note in §11 is the right instinct. The 5-tool MCP surface in §5 is well-scoped.
 
 Four things to change before building anything.
 
@@ -50,8 +50,8 @@ Make that last point a feature of the demo narrative: *"the model can increase v
 |---|---|---|
 | Twin transport | **HTTP polling @ 4 Hz**, WebSocket as stretch | Simple to build — Unity `UnityWebRequest` in a coroutine is ~20 lines. This is a prototype demo, not a production SLA: no formal latency target, just "feels responsive" (warm the sensor, watch the twin react within ~1–2 s). WebSockets in Unity is an afternoon you don't have and buys nothing a demo needs. |
 | Datastore | **In-memory ring buffer**, SQLite optional | Ring buffer alone covers `/state` and `/history` for a 3-minute demo. Add SQLite only if there's spare time and you want history to survive a restart — it's insurance, not a requirement. |
-| Serial ownership | **Separate bridge process**, not inside FastAPI | A wedged serial port must never take down the API the Unity and AR teams are polling. Bridge crashes → backend keeps serving last-known state and flags it stale. |
-| Mock mode | **First-class runtime mode, built in Phase 0** | Not a fallback bolted on Day 7. `MODE=mock` replays a recorded CSV. Unity/AR/LLM all develop against it from Day 6 AM. |
+| Serial ownership | **Separate bridge process**, not inside FastAPI | A wedged serial port must never take down the API the Unity team is polling. Bridge crashes → backend keeps serving last-known state and flags it stale. |
+| Mock mode | **First-class runtime mode, built in Phase 0** | Not a fallback bolted on Day 7. `MODE=mock` replays a recorded CSV. Unity/LLM both develop against it from Day 6 AM. |
 | Tool logic location | **One shared module**, imported by both MCP server and chat backend | Write `twin_tools.py` once. Zero duplication, one place to test. |
 | LLM + model | **`claude-opus-5`** via the `anthropic` Python SDK | Current flagship, 1M context, strongest tool-use. Thinking is on by default — set `output_config={"effort": "low"}` for demo latency. |
 | Tool loop | **`client.beta.messages.tool_runner`** with `anthropic.lib.tools.mcp` helpers | The SDK converts MCP tools into runnable tools and drives the loop. No hand-written agentic loop. |
@@ -92,6 +92,15 @@ This is the demo centrepiece: **the same MCP server serves both the custom UI an
 
 > Requires `pip install "anthropic[mcp]"` (Python 3.10+). The tool runner is a beta SDK helper — pin the `anthropic` version in `requirements.txt` so it can't shift mid-bootcamp.
 
+### 2.2 Digital twin — what it's actually for, not just a 3D model
+
+Worth stating explicitly, since evaluators will fairly ask it: the twin doesn't need to run its own analysis to earn its place, but it does have two distinct jobs, not one.
+
+1. **Live mirror.** Poll `/api/v1/state` at 4 Hz, reflect fan/heater/temperature in the Unity scene. This alone earns its keep as a demo device — it's the difference between telling an audience data is flowing and showing them a physical action (warming the sensor) produce an immediate reaction on screen.
+2. **Visualization surface for the backend's actual prediction.** The crop-stress scorer (Step 0.5) *is* the predictive piece, and it's a backend computation, not something Unity does. The twin's job is to make that prediction spatially legible: poll `/api/v1/stress` alongside `/state`, color the rig by `risk_label` (green/yellow/red), and add one simple object representing the crop itself that visually degrades — a color shift toward wilted/brown — as `risk_score` rises. That's the honest answer to "does it predict and show damage": the backend predicts crop-stress risk; the twin is where that prediction becomes visible on the object it's about, in real time.
+
+AI and digital twin aren't competing for importance here — they're two interfaces, conversational and spatial, onto the same underlying prediction. Keep both halves of that sentence in the pitch; dropping either makes the project sound like less than it is.
+
 ---
 
 ## 3. Phase 0 — Before Day 5 (critical path)
@@ -121,7 +130,7 @@ Python 3.11, `pyproject.toml`, ruff + pytest. Run tests locally before each merg
 ### Step 0.2 — Freeze the contracts, publish `docs/API.md`
 *Verify: another person can write a client from the doc alone.*
 
-This artifact unblocks Unity and AR on Day 6 AM. Publish it Day 5 evening at the latest.
+This artifact unblocks Unity on Day 6 AM. Publish it Day 5 evening at the latest.
 
 **Reading model**
 
@@ -240,7 +249,7 @@ Turn these into an automated test asserting the right tool was called for each. 
 ## 4. Phase 1 — Day 5 (pitch + roles)
 
 - Pitch with the Phase 0 stack **already running on mock data**. Pitching a working system rather than a slide is the entire advantage of Phase 0.
-- Lock roles per §7. Hand the Unity and AR leads `docs/API.md` and the mock backend URL immediately.
+- Lock roles per §11. Hand the Unity lead `docs/API.md` and the mock backend URL immediately.
 - IoT lead: flash firmware, wire DS18B20 + L298N, verify the watchdog trips with the sensor disconnected. **Bench-test the thermal cutoff before the heater is ever left unattended.**
 - Backend: stand up on a laptop with a fixed LAN IP, mock mode on. Publish the URL.
 
@@ -252,13 +261,13 @@ Turn these into an automated test asserting the right tool was called for each. 
 
 *Verify: unplug the USB cable mid-run — backend keeps serving, `sensor_online` goes false within 5 s, replug recovers within 10 s, Unity never errors.*
 
-**PM — Live integration.** Swap the MCP/chat layer from mock to live device. Unity team binds the twin to live `/state`. AR team gets plane tracking + a data overlay panel.
+**PM — Live integration.** Swap the MCP/chat layer from mock to live device. Unity team binds the twin to live `/state` and adds the crop-stress color-coding + plant visualization from §2.2, polling `/stress` alongside it.
 
 *Verify: warm the sensor by hand → twin readout and fan animation change within 2 s → ask the chat "is it hot?" → grounded answer citing the real number.*
 
 ## 6. Phase 3 — Day 7 AM/midday (end-to-end + hardening)
 
-- Full chain test: sensor → bridge → backend → MCP → LLM → answer, and separately → twin/AR.
+- Full chain test: sensor → bridge → backend → MCP → LLM → answer, and separately → twin.
 - **Sanity-check responsiveness, informally.** Warm the sensor, watch the twin react. If it feels laggy, look at it; otherwise don't build latency instrumentation or a p95 measurement pipeline — that's production rigor a prototype doesn't need. No slide claim to back up here; skip it rather than manufacture one.
 - **Failure drills**, each rehearsed at least once:
   - Unplug sensor mid-demo → does the LLM say "data is stale" rather than inventing a number?
