@@ -131,7 +131,11 @@ def _push_desired_fan(ser: serial.Serial, client: httpx.Client) -> None:
         )
         resp.raise_for_status()
         fan_pct = resp.json()["fan_pct"]
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        # KeyError/ValueError guard against a malformed-but-200 response (missing
+        # `fan_pct`, invalid JSON) -- unlikely against our own backend, but this
+        # process's whole job is to never crash on a bad response, matching the
+        # same never-fatal handling _handle_line gives a bad backend reply.
         log.warning("could not fetch desired fan state: %s", exc)
         return
 
