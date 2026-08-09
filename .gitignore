@@ -15,6 +15,7 @@ venv/
 *.db
 *.sqlite3
 *.csv
+*.jsonl
 
 # Unity
 unity/[Ll]ibrary/
