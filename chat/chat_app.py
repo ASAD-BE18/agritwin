@@ -1,24 +1,35 @@
 """
 AgriTwin — Demo Chat UI
 ========================
+Owned by: Tayyaba.
 
 A minimal FastAPI page: type a question, get an answer, see exactly which
 MCP tool(s) fired as a visible chip under the reply — the single most
 convincing thing in the demo, per the brief.
 
-STATUS: ships with USE_REAL_AGENT = False (env-overridable), so the whole UI
-is buildable and demoable today against `call_agent_stub`, before Asad's
-mcp/mcp_server.py exists. Flip it once he's ready — see call_agent_real()
-below, which already implements the exact async MCP tool_runner pattern from
-docs/Implementation_Plan.md section 2.1.
+Two modes, controlled by USE_REAL_AGENT (env var, default "false"):
+  - stub mode:  call_agent_stub() — keyword-matched placeholder answers,
+                zero dependency on mcp/mcp_server.py, for building/demoing
+                the UI shell before the real tool pipeline exists.
+  - real mode:  call_agent_real() — connects to mcp/mcp_server.py via stdio
+                once at app startup (see lifespan()), and drives the actual
+                Anthropic tool_runner loop per docs/Implementation_Plan.md
+                section 2.1. This is now REAL, working code (not a stub) —
+                requires mcp/mcp_server.py to exist (merged in PR #2) and
+                ANTHROPIC_API_KEY to be set.
 
-Run:
+Run (stub mode, no dependencies beyond requirements.txt):
     uvicorn chat_app:app --reload --port 8001
+
+Run (real mode, once mcp/mcp_server.py is available):
+    USE_REAL_AGENT=true ANTHROPIC_API_KEY=<key> uvicorn chat_app:app --reload --port 8001
+
 Env vars:
-    USE_REAL_AGENT      "true"/"false", default false
-    MCP_SERVER_CMD       command to launch mcp/mcp_server.py, default:
-                          "python ../mcp/mcp_server.py"
-    ANTHROPIC_API_KEY    required only when USE_REAL_AGENT=true
+    USE_REAL_AGENT     "true"/"false", default false
+    MCP_SERVER_CMD      command to launch mcp/mcp_server.py, default:
+                         "python ../mcp/mcp_server.py" — actually read and
+                         used (see lifespan() below), not just documented.
+    ANTHROPIC_API_KEY   required only when USE_REAL_AGENT=true
 """
 
 import os
@@ -27,6 +38,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+
+from anthropic import AsyncAnthropic
+from anthropic.lib.tools.mcp import async_mcp_tool
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client, StdioServerParameters
 
 from tool_names import (
     GET_CURRENT_CONDITIONS,
@@ -38,34 +54,34 @@ from tool_names import (
 )
 
 USE_REAL_AGENT = os.environ.get("USE_REAL_AGENT", "false").lower() == "true"
+MCP_SERVER_CMD = os.environ.get("MCP_SERVER_CMD", "python ../mcp/mcp_server.py")
 
-# Holds the long-lived MCP client session (only used in real mode) so we
-# connect once at startup instead of spawning mcp_server.py per request.
+# Holds the long-lived MCP client session (real mode only) so we connect
+# once at startup instead of spawning mcp_server.py per request.
 mcp_session = {"session": None}
+
+# Only instantiate the Anthropic client in real mode — avoids requiring
+# ANTHROPIC_API_KEY to even be set when running in stub mode.
+anthropic_client = AsyncAnthropic() if USE_REAL_AGENT else None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if USE_REAL_AGENT:
-        # ============================================================
-        # Real startup — connects once, kept alive for the app's lifetime.
-        # Uncomment once anthropic[mcp] is installed and mcp_server.py exists.
-        # ============================================================
-        # from mcp import ClientSession
-        # from mcp.client.stdio import stdio_client, StdioServerParameters
-        # params = StdioServerParameters(command="python", args=["../mcp/mcp_server.py"])
-        # async with stdio_client(params) as (r, w):
-        #     async with ClientSession(r, w) as session:
-        #         await session.initialize()
-        #         mcp_session["session"] = session
-        #         yield
-        # return
-        raise RuntimeError(
-            "USE_REAL_AGENT=true but the real MCP startup block is still "
-            "commented out — uncomment it in chat_app.py once mcp/mcp_server.py "
-            "exists and anthropic[mcp] is installed."
-        )
-    yield  # stub mode: nothing to start up
+    if not USE_REAL_AGENT:
+        yield
+        return
+
+    # MCP_SERVER_CMD is a single command string, e.g. "python ../mcp/mcp_server.py"
+    # — split it into (command, args) the way StdioServerParameters expects.
+    cmd_parts = MCP_SERVER_CMD.split()
+    command, args = cmd_parts[0], cmd_parts[1:]
+    params = StdioServerParameters(command=command, args=args)
+
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            mcp_session["session"] = session
+            yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -78,9 +94,10 @@ class ChatRequest(BaseModel):
 def call_agent_stub(question: str):
     """
     Fake agent driven by keyword matching against the 5 REAL tool names —
-    good enough to build/demo the UI shell against today. Return shape
-    (answer: str, tools_called: list[str]) is exactly what call_agent_real
-    must also return, so the UI code below never has to change.
+    kept alongside the real implementation so the UI is still demoable with
+    zero external dependencies (no API key, no mcp_server.py subprocess)
+    when USE_REAL_AGENT=false. Return shape (answer, tools_called) matches
+    call_agent_real() exactly, so the routes below never branch on shape.
     """
     q = question.lower()
     if "peak" in q or "last hour" in q or "history" in q:
@@ -103,48 +120,39 @@ def call_agent_stub(question: str):
 
 async def call_agent_real(question: str):
     """
-    ============================================================
-    FILL THIS IN once mcp/mcp_server.py exists (Asad).
-    ============================================================
-    Follows docs/Implementation_Plan.md section 2.1 exactly:
-
-        from anthropic import AsyncAnthropic
-        from anthropic.lib.tools.mcp import async_mcp_tool
-
-        client = AsyncAnthropic()
-        session = mcp_session["session"]
-        tools = (await session.list_tools()).tools
-
-        runner = client.beta.messages.tool_runner(
-            model="claude-opus-5",
-            max_tokens=4096,
-            output_config={"effort": "low"},
-            system=GROUNDING_SYSTEM_PROMPT,
-            tools=[async_mcp_tool(t, session) for t in tools],
-            messages=[{"role": "user", "content": question}],
+    Real implementation per docs/Implementation_Plan.md section 2.1: connects
+    to the live MCP session (established once in lifespan()), converts its
+    tools into runnable Anthropic tools, and drives the tool_runner loop.
+    """
+    session = mcp_session["session"]
+    if session is None:
+        raise RuntimeError(
+            "MCP session not initialized — this only runs correctly under "
+            "USE_REAL_AGENT=true with the app's lifespan startup, not when "
+            "called standalone without the FastAPI app having started."
         )
 
-        tools_called = []
-        final_text = ""
-        async for message in runner:
-            for block in getattr(message, "content", []):
-                if getattr(block, "type", None) == "tool_use":
-                    tools_called.append(block.name)
-                if getattr(block, "type", None) == "text":
-                    final_text += block.text
+    tools = (await session.list_tools()).tools
 
-        return final_text, tools_called
-    ============================================================
-    """
-    raise NotImplementedError("Wire this up once mcp/mcp_server.py is ready.")
-
-
-def render_chip(name: str) -> str:
-    return (
-        f'<span style="background:#1F4E79;color:white;padding:4px 10px;'
-        f'border-radius:12px;margin-right:6px;font-size:0.85em;display:inline-block;'
-        f'margin-top:4px;">🔧 called {name}</span>'
+    runner = anthropic_client.beta.messages.tool_runner(
+        model="claude-opus-5",
+        max_tokens=4096,
+        output_config={"effort": "low"},
+        system=GROUNDING_SYSTEM_PROMPT,
+        tools=[async_mcp_tool(t, session) for t in tools],
+        messages=[{"role": "user", "content": question}],
     )
+
+    tools_called = []
+    final_text = ""
+    async for message in runner:
+        for block in getattr(message, "content", []):
+            if getattr(block, "type", None) == "tool_use":
+                tools_called.append(block.name)
+            if getattr(block, "type", None) == "text":
+                final_text += block.text
+
+    return final_text, tools_called
 
 
 @app.post("/api/chat")
@@ -161,7 +169,7 @@ def index():
     mode_banner = "" if USE_REAL_AGENT else (
         '<div style="background:#fff3cd;padding:8px;border-radius:6px;margin-bottom:12px;">'
         'Running in STUB mode — answers are placeholders. '
-        'Set USE_REAL_AGENT=true once mcp/mcp_server.py is ready.</div>'
+        'Set USE_REAL_AGENT=true (with ANTHROPIC_API_KEY set) to use the real agent.</div>'
     )
     return f"""
 <!DOCTYPE html>
