@@ -40,10 +40,34 @@ Every response carries units in field names (`temp_c`, `fan_pct`, `data_age_s`).
   "heater_on": false,
   "seq": 1234,
   "data_age_s": 0.4,
+  "sensor_online": true,
   "mode": "mock",
   "watchdog_tripped": false
 }
 ```
+
+`sensor_online` is `data_age_s < 5s`, computed server-side — use it directly for a stale
+indicator instead of re-implementing the threshold check on the client.
+
+Before any reading has ever been ingested, every field except `sensor_online` and `mode` is
+`null` (this includes `watchdog_tripped`), and `mode` is `"unknown"` (not `"device"`/`"mock"`)
+— handle that shape too, it's the real response you'll see on a freshly started backend.
+
+## Example `/api/v1/stress` response
+
+```json
+{
+  "risk_score": 66,
+  "risk_label": "stress",
+  "factors": [
+    "Temperature 31.5 °C is above the 30 °C stress threshold",
+    "10-minute average of 31.5 °C confirms this isn't a brief sensor spike"
+  ]
+}
+```
+
+`risk_label` is one of `"ok"`, `"caution"`, `"stress"` — see plan §2.2 for why the twin polls
+this too, not just `/state`.
 
 ## Contract changes
 
@@ -56,4 +80,6 @@ Every response carries units in field names (`temp_c`, `fan_pct`, `data_age_s`).
 
 ## Status
 
-Draft — pre-populated from the planning doc. Asad will confirm this is final (or note changes) by end of Day 5, per the implementation plan's Step 0.2.
+Confirmed against the actual implemented backend (not just the planning doc) as of PR #1 —
+`sensor_online` was missing from this file until it was caught while answering a Unity
+integration question; verified directly against `backend/app/models.py`.
