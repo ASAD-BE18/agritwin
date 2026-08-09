@@ -26,6 +26,7 @@ class ReadingStore:
             heater_on=payload.heater_on,
             seq=payload.seq,
             source=payload.source,
+            watchdog_tripped=payload.watchdog_tripped,
         )
         self._buffer.append(reading)
         return reading

@@ -63,6 +63,7 @@ def get_state() -> StateResponse:
             data_age_s=None,
             sensor_online=False,
             mode="unknown",
+            watchdog_tripped=None,
         )
 
     return StateResponse(
@@ -74,6 +75,7 @@ def get_state() -> StateResponse:
         data_age_s=age,
         sensor_online=online,
         mode=last.source,
+        watchdog_tripped=last.watchdog_tripped,
     )
 
 

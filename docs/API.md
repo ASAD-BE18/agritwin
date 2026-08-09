@@ -12,6 +12,7 @@ class Reading(BaseModel):
     heater_on: bool
     seq: int
     source: Literal["device", "mock"]
+    watchdog_tripped: bool = False   # firmware's W flag — see "Contract changes" below
 ```
 
 ## Endpoints
@@ -40,7 +41,8 @@ Every response carries units in field names (`temp_c`, `fan_pct`, `data_age_s`).
   "seq": 1234,
   "data_age_s": 0.4,
   "sensor_online": true,
-  "mode": "mock"
+  "mode": "mock",
+  "watchdog_tripped": false
 }
 ```
 
@@ -48,8 +50,8 @@ Every response carries units in field names (`temp_c`, `fan_pct`, `data_age_s`).
 indicator instead of re-implementing the threshold check on the client.
 
 Before any reading has ever been ingested, every field except `sensor_online` and `mode` is
-`null`, and `mode` is `"unknown"` (not `"device"`/`"mock"`) — handle that shape too, it's the
-real response you'll see on a freshly started backend.
+`null` (this includes `watchdog_tripped`), and `mode` is `"unknown"` (not `"device"`/`"mock"`)
+— handle that shape too, it's the real response you'll see on a freshly started backend.
 
 ## Example `/api/v1/stress` response
 
@@ -66,6 +68,15 @@ real response you'll see on a freshly started backend.
 
 `risk_label` is one of `"ok"`, `"caution"`, `"stress"` — see plan §2.2 for why the twin polls
 this too, not just `/state`.
+
+## Contract changes
+
+- **2026-08-09 (Asad):** added `watchdog_tripped: bool` to `Reading`/`IngestPayload`/
+  `StateResponse`. The firmware protocol (`docs/team-briefs/IRFAN.md`) reports a `W`
+  flag on every telemetry line — the contract had no field to carry it, so the bridge
+  was about to have to drop a safety-relevant signal on the floor. Defaults to `False`
+  on `IngestPayload`, so existing producers (web_sim, any in-flight mock data work)
+  don't need to change to stay valid — this is additive, not breaking.
 
 ## Status
 
