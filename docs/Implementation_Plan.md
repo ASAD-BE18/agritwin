@@ -103,7 +103,9 @@ Everything here is buildable with **zero hardware**. Target: done and green befo
 
 ```
 agritwin/
-  firmware/agritwin.ino
+  firmware/common/{AgriTwinCore,Actuators}.{h,cpp}
+  firmware/agritwin_hardware/{agritwin_hardware.ino,HardwareActuators.cpp}
+  firmware/web_sim/{index.html,app.js,style.css}   # browser demo, feeds /api/v1/ingest directly
   backend/
     app/{main,models,store,control,stress,config}.py
     tests/

@@ -13,7 +13,7 @@ A small IoT greenhouse rig (temperature sensor + heater + fan) with a live "digi
 ## Repo layout
 
 ```
-firmware/           Arduino sketch — Irfan
+firmware/           Arduino sketch (common/ + agritwin_hardware/) + web_sim/ browser demo — Irfan
 backend/app/        FastAPI backend — Asad
 backend/tests/
 bridge/             Serial<->backend bridge + mock data source — Asad / Tayyaba
