@@ -12,6 +12,7 @@ class Reading(BaseModel):
     heater_on: bool
     seq: int
     source: Literal["device", "mock"]
+    watchdog_tripped: bool = False   # firmware's W flag — see "Contract changes" below
 ```
 
 ## Endpoints
@@ -39,9 +40,19 @@ Every response carries units in field names (`temp_c`, `fan_pct`, `data_age_s`).
   "heater_on": false,
   "seq": 1234,
   "data_age_s": 0.4,
-  "mode": "mock"
+  "mode": "mock",
+  "watchdog_tripped": false
 }
 ```
+
+## Contract changes
+
+- **2026-08-09 (Asad):** added `watchdog_tripped: bool` to `Reading`/`IngestPayload`/
+  `StateResponse`. The firmware protocol (`docs/team-briefs/IRFAN.md`) reports a `W`
+  flag on every telemetry line — the contract had no field to carry it, so the bridge
+  was about to have to drop a safety-relevant signal on the floor. Defaults to `False`
+  on `IngestPayload`, so existing producers (web_sim, any in-flight mock data work)
+  don't need to change to stay valid — this is additive, not breaking.
 
 ## Status
 

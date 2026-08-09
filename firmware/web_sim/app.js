@@ -93,7 +93,7 @@ function render({ tempC, actualFanPct, actualHeaterOn, watchdogTripped }) {
   banner.hidden = !watchdogTripped;
 }
 
-async function sendReading({ tempC, actualFanPct, actualHeaterOn }) {
+async function sendReading({ tempC, actualFanPct, actualHeaterOn, watchdogTripped }) {
   const url = `${backendUrlInput.value.replace(/\/$/, "")}/api/v1/ingest`;
   try {
     const res = await fetch(url, {
@@ -108,6 +108,7 @@ async function sendReading({ tempC, actualFanPct, actualHeaterOn }) {
         heater_on: actualHeaterOn,
         seq: seq++,
         source: "mock",
+        watchdog_tripped: watchdogTripped,
       }),
     });
     if (!res.ok) {
