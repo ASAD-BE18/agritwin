@@ -20,8 +20,13 @@ This PR grew across several pushes — this entry reflects its current, final sc
 - **Serial bridge** (`bridge/`): owns the Arduino's serial port as its own process,
   forwards telemetry to `/api/v1/ingest`, and pushes the fan setpoint back down —
   ready to test once real hardware exists.
+- Merged `main` in and resolved a real conflict in `docs/API.md` (both sides had
+  edited the same `/state` example block).
+- Self-review fix: the bridge's fan-setpoint poll could crash the whole process on
+  a malformed-but-200 backend response — broadened an overly narrow exception
+  handler, added 2 regression tests.
 
-71 tests total across backend/mcp/bridge (all green): 45 backend, 9 mcp, 17 bridge.
+73 tests total across backend/mcp/bridge (all green): 45 backend, 9 mcp, 19 bridge.
 
 ## Why it matters
 Everything upstream of Claude is now built and tested end-to-end against the web
