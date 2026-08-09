@@ -1,6 +1,7 @@
 """
 AgriTwin — Mock Data Source
 ============================
+Owned by: Tayyaba (per README: bridge/ is Asad/Tayyaba).
 
 Two jobs, both in this one file:
 
@@ -13,6 +14,11 @@ Two jobs, both in this one file:
        body:   Reading-shaped JSON — ts, temp_c, fan_pct, heater_on, seq, source
 
    matching backend/app/models.py's Reading model exactly, per docs/API.md.
+
+Uses httpx rather than requests — httpx is already the shared HTTP client
+across bridge/serial_bridge.py and mcp/twin_tools.py (and is what's declared
+in bridge/pyproject.toml), so this keeps the stack to one HTTP library
+instead of two.
 
 Run standalone:
     MODE=mock python mock_source.py
@@ -31,10 +37,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-try:
-    import requests
-except ImportError:
-    requests = None  # generation still works without it; replay needs it
+import httpx
 
 # ---------------------------------------------------------------
 # Determinism knobs — fixed on purpose. Do not seed from wall-clock.
@@ -104,6 +107,13 @@ def write_csv(rows, path=CSV_PATH):
 
 
 def load_or_generate_csv(path=CSV_PATH):
+    # NOTE: this only regenerates the CSV if it doesn't already exist on
+    # disk. If you change generate_profile()'s logic later (different
+    # phase timings, a new spike, etc.), delete the cached file yourself —
+    # `bridge/data/mock_greenhouse_log.csv` — or this will keep silently
+    # replaying the OLD profile and your change will look like it did
+    # nothing. (The file is gitignored, so this is a local-only gotcha,
+    # not something that ships stale to anyone else.)
     if path.exists():
         rows = []
         with open(path) as f:
@@ -122,40 +132,38 @@ def load_or_generate_csv(path=CSV_PATH):
 def replay(backend_url, api_key, speedup=1.0):
     """Replays the CSV in real (or sped-up) time, POSTing each row to
     /api/v1/ingest with the exact Reading shape the backend expects."""
-    if requests is None:
-        raise SystemExit("`requests` not installed — pip install requests")
-
     rows = load_or_generate_csv()
     ingest_url = backend_url.rstrip("/") + "/api/v1/ingest"
     headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
 
     print(f"Replaying {len(rows)} rows to {ingest_url} (speedup={speedup}x)")
 
-    prev_offset_s = 0
-    for i, row in enumerate(rows):
-        offset_s = i * INTERVAL_SECONDS
-        wait_s = max(0.0, (offset_s - prev_offset_s) / speedup)
-        if i > 0:
-            time.sleep(wait_s)
-        prev_offset_s = offset_s
+    with httpx.Client(timeout=3) as client:
+        prev_offset_s = 0
+        for i, row in enumerate(rows):
+            offset_s = i * INTERVAL_SECONDS
+            wait_s = max(0.0, (offset_s - prev_offset_s) / speedup)
+            if i > 0:
+                time.sleep(wait_s)
+            prev_offset_s = offset_s
 
-        payload = {
-            "ts": datetime.now(timezone.utc).isoformat(),  # "arrives" now
-            "temp_c": row["temp_c"],
-            "fan_pct": row["fan_pct"],
-            "heater_on": row["heater_on"],
-            "seq": row["seq"],
-            "source": "mock",
-        }
+            payload = {
+                "ts": datetime.now(timezone.utc).isoformat(),  # "arrives" now
+                "temp_c": row["temp_c"],
+                "fan_pct": row["fan_pct"],
+                "heater_on": row["heater_on"],
+                "seq": row["seq"],
+                "source": "mock",
+            }
 
-        try:
-            resp = requests.post(ingest_url, json=payload, headers=headers, timeout=3)
-            status = resp.status_code
-        except requests.RequestException as e:
-            status = f"ERROR: {e}"
+            try:
+                resp = client.post(ingest_url, json=payload, headers=headers)
+                status = resp.status_code
+            except httpx.HTTPError as e:
+                status = f"ERROR: {e}"
 
-        print(f"[{i+1}/{len(rows)}] temp_c={row['temp_c']:>5} fan_pct={row['fan_pct']:>3} "
-              f"heater_on={row['heater_on']!s:<5} -> {status}")
+            print(f"[{i+1}/{len(rows)}] temp_c={row['temp_c']:>5} fan_pct={row['fan_pct']:>3} "
+                  f"heater_on={row['heater_on']!s:<5} -> {status}")
 
 
 def main():
