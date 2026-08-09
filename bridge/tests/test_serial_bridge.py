@@ -119,3 +119,23 @@ def test_push_desired_fan_does_not_raise_or_write_when_backend_errors():
     ser = FakeSerial()
     serial_bridge._push_desired_fan(ser, client)  # must not raise
     assert ser.written == []
+
+
+def test_push_desired_fan_does_not_raise_on_malformed_200_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": "shape"})  # no fan_pct key
+
+    client = httpx.Client(base_url="http://backend.test", transport=httpx.MockTransport(handler))
+    ser = FakeSerial()
+    serial_bridge._push_desired_fan(ser, client)  # must not raise KeyError
+    assert ser.written == []
+
+
+def test_push_desired_fan_does_not_raise_on_invalid_json_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json")
+
+    client = httpx.Client(base_url="http://backend.test", transport=httpx.MockTransport(handler))
+    ser = FakeSerial()
+    serial_bridge._push_desired_fan(ser, client)  # must not raise a JSON decode error
+    assert ser.written == []
