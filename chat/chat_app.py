@@ -6,23 +6,26 @@ A minimal FastAPI page: type a question, get an answer, see exactly which
 MCP tool(s) fired as a visible chip under the reply — the single most
 convincing thing in the demo, per the brief.
 
-STATUS: ships with USE_REAL_AGENT = False (env-overridable), so the whole UI
-is buildable and demoable today against `call_agent_stub`, before Asad's
-mcp/mcp_server.py exists. Flip it once he's ready — see call_agent_real()
-below, which already implements the exact async MCP tool_runner pattern from
-docs/Implementation_Plan.md section 2.1.
+STATUS: real-agent mode is implemented (see call_agent_real / lifespan below),
+following the async MCP tool_runner pattern from
+docs/Implementation_Plan.md section 2.1. Defaults to USE_REAL_AGENT=false
+(the stub) since it needs a live ANTHROPIC_API_KEY to actually call Claude.
 
 Run:
     uvicorn chat_app:app --reload --port 8001
 Env vars:
     USE_REAL_AGENT      "true"/"false", default false
     MCP_SERVER_CMD       command to launch mcp/mcp_server.py, default:
-                          "python ../mcp/mcp_server.py"
+                          "<this process's own interpreter> <repo>/mcp/mcp_server.py"
+                          -- both resolved from this file's own location/venv,
+                          not the process's cwd or whatever "python" is on PATH
     ANTHROPIC_API_KEY    required only when USE_REAL_AGENT=true
 """
 
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -39,6 +42,17 @@ from tool_names import (
 
 USE_REAL_AGENT = os.environ.get("USE_REAL_AGENT", "false").lower() == "true"
 
+# Both pieces resolved from this process's own state, not assumed:
+#   - the script path is relative to this file's location, not the process's
+#     cwd (a hardcoded "../mcp/mcp_server.py" would break the moment uvicorn
+#     is launched from anywhere other than this exact directory);
+#   - the interpreter is sys.executable (this venv), not a bare "python" --
+#     that resolves via PATH and can silently pick a different Python with
+#     none of this project's dependencies installed (found by testing this:
+#     it picked a system Python missing python-dotenv).
+_DEFAULT_MCP_SERVER_PATH = Path(__file__).resolve().parent.parent / "mcp" / "mcp_server.py"
+MCP_SERVER_CMD = os.environ.get("MCP_SERVER_CMD", f"{sys.executable} {_DEFAULT_MCP_SERVER_PATH}")
+
 # Holds the long-lived MCP client session (only used in real mode) so we
 # connect once at startup instead of spawning mcp_server.py per request.
 mcp_session = {"session": None}
@@ -47,24 +61,17 @@ mcp_session = {"session": None}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if USE_REAL_AGENT:
-        # ============================================================
-        # Real startup — connects once, kept alive for the app's lifetime.
-        # Uncomment once anthropic[mcp] is installed and mcp_server.py exists.
-        # ============================================================
-        # from mcp import ClientSession
-        # from mcp.client.stdio import stdio_client, StdioServerParameters
-        # params = StdioServerParameters(command="python", args=["../mcp/mcp_server.py"])
-        # async with stdio_client(params) as (r, w):
-        #     async with ClientSession(r, w) as session:
-        #         await session.initialize()
-        #         mcp_session["session"] = session
-        #         yield
-        # return
-        raise RuntimeError(
-            "USE_REAL_AGENT=true but the real MCP startup block is still "
-            "commented out — uncomment it in chat_app.py once mcp/mcp_server.py "
-            "exists and anthropic[mcp] is installed."
-        )
+        from mcp import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        command, *args = MCP_SERVER_CMD.split()
+        params = StdioServerParameters(command=command, args=args)
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                mcp_session["session"] = session
+                yield
+        return
     yield  # stub mode: nothing to start up
 
 
@@ -103,40 +110,49 @@ def call_agent_stub(question: str):
 
 async def call_agent_real(question: str):
     """
-    ============================================================
-    FILL THIS IN once mcp/mcp_server.py exists (Asad).
-    ============================================================
-    Follows docs/Implementation_Plan.md section 2.1 exactly:
+    Follows docs/Implementation_Plan.md section 2.1: the same MCP server
+    (mcp/mcp_server.py, spawned once at startup by lifespan()) drives both
+    this chat UI and Claude Desktop/Code.
 
-        from anthropic import AsyncAnthropic
-        from anthropic.lib.tools.mcp import async_mcp_tool
+    Collects tool_use names from every message the runner yields (tool calls
+    happen in intermediate turns), but takes the final answer text only from
+    the *last* yielded message rather than concatenating text across every
+    turn -- summing text blocks across turns would duplicate any "let me
+    check that" narration a multi-tool-call turn produces.
+    """
+    from anthropic import AsyncAnthropic
+    from anthropic.lib.tools.mcp import async_mcp_tool
 
-        client = AsyncAnthropic()
-        session = mcp_session["session"]
-        tools = (await session.list_tools()).tools
+    session = mcp_session["session"]
+    tools = (await session.list_tools()).tools
 
-        runner = client.beta.messages.tool_runner(
-            model="claude-opus-5",
-            max_tokens=4096,
-            output_config={"effort": "low"},
-            system=GROUNDING_SYSTEM_PROMPT,
-            tools=[async_mcp_tool(t, session) for t in tools],
-            messages=[{"role": "user", "content": question}],
+    client = AsyncAnthropic()
+    runner = client.beta.messages.tool_runner(
+        model="claude-opus-5",
+        max_tokens=4096,
+        output_config={"effort": "low"},
+        system=GROUNDING_SYSTEM_PROMPT,
+        tools=[async_mcp_tool(t, session) for t in tools],
+        messages=[{"role": "user", "content": question}],
+    )
+
+    tools_called = []
+    last_message = None
+    async for message in runner:
+        last_message = message
+        for block in getattr(message, "content", []):
+            if getattr(block, "type", None) == "tool_use":
+                tools_called.append(block.name)
+
+    final_text = ""
+    if last_message is not None:
+        final_text = "".join(
+            block.text
+            for block in getattr(last_message, "content", [])
+            if getattr(block, "type", None) == "text"
         )
 
-        tools_called = []
-        final_text = ""
-        async for message in runner:
-            for block in getattr(message, "content", []):
-                if getattr(block, "type", None) == "tool_use":
-                    tools_called.append(block.name)
-                if getattr(block, "type", None) == "text":
-                    final_text += block.text
-
-        return final_text, tools_called
-    ============================================================
-    """
-    raise NotImplementedError("Wire this up once mcp/mcp_server.py is ready.")
+    return final_text, tools_called
 
 
 def render_chip(name: str) -> str:
@@ -149,10 +165,22 @@ def render_chip(name: str) -> str:
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    if USE_REAL_AGENT:
-        answer, tools_called = await call_agent_real(req.message)
-    else:
+    if not USE_REAL_AGENT:
         answer, tools_called = call_agent_stub(req.message)
+        return {"reply": answer, "tools_called": tools_called}
+
+    try:
+        answer, tools_called = await call_agent_real(req.message)
+    except Exception as exc:
+        # Matches the plan's own failure-drill requirement (Implementation_Plan.md
+        # §6): "kill the LLM API -- does the UI degrade cleanly, or throw?" A raw
+        # 500 here would fail that drill. Per the grounding system prompt's own
+        # rule ("if a tool fails, say so -- do not estimate"), say so rather than
+        # returning a fabricated answer.
+        return {
+            "reply": f"(unavailable) Could not reach the AI service: {exc}",
+            "tools_called": [],
+        }
     return {"reply": answer, "tools_called": tools_called}
 
 
@@ -161,7 +189,7 @@ def index():
     mode_banner = "" if USE_REAL_AGENT else (
         '<div style="background:#fff3cd;padding:8px;border-radius:6px;margin-bottom:12px;">'
         'Running in STUB mode — answers are placeholders. '
-        'Set USE_REAL_AGENT=true once mcp/mcp_server.py is ready.</div>'
+        'Set ANTHROPIC_API_KEY and USE_REAL_AGENT=true to talk to the real model.</div>'
     )
     return f"""
 <!DOCTYPE html>
