@@ -46,3 +46,28 @@ def test_state_before_any_data(client):
     assert body["sensor_online"] is False
     assert body["mode"] == "unknown"
     assert body["temp_c"] is None
+
+
+def test_watchdog_tripped_defaults_false(client, api_key_headers):
+    resp = client.post(
+        "/api/v1/ingest",
+        headers=api_key_headers,
+        json={"temp_c": 24.0, "fan_pct": 50, "heater_on": False, "seq": 1},
+    )
+    assert resp.json()["watchdog_tripped"] is False
+
+
+def test_watchdog_tripped_passes_through_to_state(client, api_key_headers):
+    client.post(
+        "/api/v1/ingest",
+        headers=api_key_headers,
+        json={
+            "temp_c": 33.0,
+            "fan_pct": 100,
+            "heater_on": False,
+            "seq": 1,
+            "watchdog_tripped": True,
+        },
+    )
+    resp = client.get("/api/v1/state")
+    assert resp.json()["watchdog_tripped"] is True

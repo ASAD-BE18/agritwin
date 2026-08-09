@@ -16,6 +16,7 @@ class Reading(BaseModel):
     heater_on: bool
     seq: int
     source: Literal["device", "mock"]
+    watchdog_tripped: bool = False
 
 
 class IngestPayload(BaseModel):
@@ -27,6 +28,7 @@ class IngestPayload(BaseModel):
     heater_on: bool
     seq: int
     source: Literal["device", "mock"] = "device"
+    watchdog_tripped: bool = False
 
 
 class StateResponse(BaseModel):
@@ -38,6 +40,7 @@ class StateResponse(BaseModel):
     data_age_s: float | None
     sensor_online: bool
     mode: Literal["device", "mock", "unknown"]
+    watchdog_tripped: bool | None
 
 
 class HistorySummary(BaseModel):
