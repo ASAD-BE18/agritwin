@@ -2,7 +2,7 @@
 
 A small IoT greenhouse rig (temperature sensor + heater + fan) with a live "digital twin" and a tool-grounded LLM chat interface on top. Built for the CATCH_VR Summer School 2026 capstone.
 
-**Architecture:** hardware (Arduino) → FastAPI backend (single source of truth) → MCP server (5 tools) → LLM (Claude) → Unity digital twin. The LLM never touches hardware or the database directly — it can only call the 5 named MCP tools, and heater control is intentionally excluded from that tool surface entirely (read-only, firmware-enforced safety cutoff independent of any software layer).
+**Architecture:** hardware (Arduino) → FastAPI backend (single source of truth) → MCP server (5 tools) → LLM (Claude by design; see [Running the dev stack locally](#running-the-dev-stack-locally) for why the demo chat UI currently calls OpenRouter instead) → Unity digital twin. The LLM never touches hardware or the database directly — it can only call the 5 named MCP tools, and heater control is intentionally excluded from that tool surface entirely (read-only, firmware-enforced safety cutoff independent of any software layer).
 
 ## Start here
 
@@ -34,3 +34,28 @@ changelog/          One file per PR — see changelog/README.md
 ## Mock mode
 
 The backend supports `MODE=mock` from day one — a recorded, realistic 30-minute greenhouse profile replayed through the same API as real hardware would use. Everyone except firmware work can build and test against this before any hardware exists.
+
+## Running the dev stack locally
+
+`scripts/run-dev-stack.ps1` starts the backend, the mock data replay, and the chat UI together, streaming all three logs into one window (each line prefixed `[backend]`/`[mock]`/`[chat]`); Ctrl+C stops all three at once. Requires a virtualenv at `.venv/` with each service's dependencies installed (see each folder's `requirements.txt`).
+
+```powershell
+.\scripts\run-dev-stack.ps1
+```
+
+The chat UI defaults to **stub mode** at http://127.0.0.1:8001 — keyword-matched placeholder answers, no API key needed. For the real agent path (actual MCP tool-calling against a live model), pass `-RealAgent` with an OpenRouter key:
+
+```powershell
+.\scripts\run-dev-stack.ps1 -RealAgent -OpenRouterApiKey "sk-or-..."
+```
+
+Real mode calls the model through [OpenRouter](https://openrouter.ai) (an OpenAI-compatible API) using the free `openrouter/free` router model, rather than a direct Anthropic key — no Anthropic key is currently available for this project. See `chat/chat_app.py`'s module docstring for the full env var list (`USE_REAL_AGENT`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`).
+
+All parameters (all optional):
+
+| Parameter           | Default                     | Purpose                                                        |
+|---------------------|------------------------------|-----------------------------------------------------------------|
+| `-ApiKey`           | `dev-only-key-change-me`    | `AGRITWIN_API_KEY` — must match between backend, mock feed, chat |
+| `-MockSpeedup`      | `30`                         | Replay speed for the 30-minute mock dataset (30x ≈ 1 minute)     |
+| `-RealAgent`        | off (stub mode)              | Switch chat UI to the real MCP tool-calling agent                |
+| `-OpenRouterApiKey` | *(none)*                     | Required when `-RealAgent` is set                                |
