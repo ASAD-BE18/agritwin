@@ -37,7 +37,7 @@ The backend supports `MODE=mock` from day one — a recorded, realistic 30-minut
 
 ## Running the dev stack locally
 
-`scripts/run-dev-stack.ps1` starts the backend, the mock data replay, and the chat UI together, streaming all three logs into one window (each line prefixed `[backend]`/`[mock]`/`[chat]`); Ctrl+C stops all three at once.
+`scripts/run-dev-stack.ps1` starts the backend, the mock data replay, and the chat UI together, streaming all three logs into one window (each line prefixed `[backend]`/`[mock]`/`[chat]`); Ctrl+C stops all three at once. Requires a virtualenv at `.venv/` with each service's dependencies installed (see each folder's `requirements.txt`).
 
 ```powershell
 .\scripts\run-dev-stack.ps1
@@ -50,3 +50,12 @@ The chat UI defaults to **stub mode** at http://127.0.0.1:8001 — keyword-match
 ```
 
 Real mode calls the model through [OpenRouter](https://openrouter.ai) (an OpenAI-compatible API) using the free `openrouter/free` router model, rather than a direct Anthropic key — no Anthropic key is currently available for this project. See `chat/chat_app.py`'s module docstring for the full env var list (`USE_REAL_AGENT`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`).
+
+All parameters (all optional):
+
+| Parameter           | Default                     | Purpose                                                        |
+|---------------------|------------------------------|-----------------------------------------------------------------|
+| `-ApiKey`           | `dev-only-key-change-me`    | `AGRITWIN_API_KEY` — must match between backend, mock feed, chat |
+| `-MockSpeedup`      | `30`                         | Replay speed for the 30-minute mock dataset (30x ≈ 1 minute)     |
+| `-RealAgent`        | off (stub mode)              | Switch chat UI to the real MCP tool-calling agent                |
+| `-OpenRouterApiKey` | *(none)*                     | Required when `-RealAgent` is set                                |
