@@ -1,20 +1,22 @@
 <#
 .SYNOPSIS
     Launches the full AgriTwin dev stack for local testing: backend, a mock data
-    feed, and the chat UI, each in its own window so you can watch logs live.
+    feed, and the chat UI, all as background jobs streaming into this one window.
 
 .DESCRIPTION
-    Starts three processes:
+    Starts three processes as PowerShell background jobs:
       1. FastAPI backend        (backend/app/main.py)      -> http://localhost:8000
       2. Mock data replay       (bridge/mock_source.py)     -> feeds the backend
       3. Chat UI                (chat/chat_app.py)          -> http://127.0.0.1:8001
 
     Defaults to stub mode for the chat UI (no API key needed). Pass -RealAgent
-    with -AnthropicApiKey to have it actually call Claude through mcp/mcp_server.py
-    (mcp_server.py is spawned by chat_app.py itself -- you don't start it separately).
+    with -OpenRouterApiKey to have it actually call the model (OpenRouter's free
+    router, "openrouter/free") through mcp/mcp_server.py (mcp_server.py is
+    spawned by chat_app.py itself -- you don't start it separately).
 
-    Each service opens in its own PowerShell window; close a window (or Ctrl+C
-    inside it) to stop that piece independently. Ports 8000 and 8001 must be free.
+    All three services' output streams into this single window, each line
+    prefixed with [backend]/[mock]/[chat]. Press Ctrl+C to stop all three at
+    once. Ports 8000 and 8001 must be free.
 
 .PARAMETER ApiKey
     AGRITWIN_API_KEY -- must match the backend's. Defaults to the repo's documented
@@ -26,31 +28,31 @@
 
 .PARAMETER RealAgent
     Switch. When set, starts the chat UI with USE_REAL_AGENT=true. Requires
-    -AnthropicApiKey.
+    -OpenRouterApiKey.
 
-.PARAMETER AnthropicApiKey
-    Your Anthropic API key. Required (and only used) when -RealAgent is set.
+.PARAMETER OpenRouterApiKey
+    Your OpenRouter API key. Required (and only used) when -RealAgent is set.
 
 .EXAMPLE
     .\scripts\run-dev-stack.ps1
     Everything in stub mode against the mock data replay.
 
 .EXAMPLE
-    .\scripts\run-dev-stack.ps1 -RealAgent -AnthropicApiKey sk-ant-...
-    Same, but the chat UI actually calls Claude via mcp_server.py.
+    .\scripts\run-dev-stack.ps1 -RealAgent -OpenRouterApiKey sk-or-...
+    Same, but the chat UI actually calls the model via OpenRouter + mcp_server.py.
 #>
 
 param(
     [string]$ApiKey = "dev-only-key-change-me",
     [int]$MockSpeedup = 30,
     [switch]$RealAgent,
-    [string]$AnthropicApiKey = ""
+    [string]$OpenRouterApiKey = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-if ($RealAgent -and -not $AnthropicApiKey) {
-    Write-Error "-RealAgent requires -AnthropicApiKey <your key>"
+if ($RealAgent -and -not $OpenRouterApiKey) {
+    Write-Error "-RealAgent requires -OpenRouterApiKey <your key>"
     exit 1
 }
 
@@ -66,41 +68,72 @@ Write-Host "Repo root: $RepoRoot"
 Write-Host "Python:    $VenvPython"
 Write-Host ""
 
+$jobs = @()
+
 # --- 1. Backend ---
-Write-Host "Starting backend on http://localhost:8000 ..."
-Start-Process powershell -ArgumentList @(
-    "-NoExit", "-Command",
-    "cd '$RepoRoot\backend'; `$env:AGRITWIN_API_KEY='$ApiKey'; & '$VenvPython' -m uvicorn app.main:app --reload"
-)
+$jobs += Start-Job -Name "backend" -ScriptBlock {
+    param($RepoRoot, $VenvPython, $ApiKey)
+    Set-Location "$RepoRoot\backend"
+    $env:AGRITWIN_API_KEY = $ApiKey
+    & $VenvPython -m uvicorn app.main:app --reload 2>&1
+} -ArgumentList $RepoRoot, $VenvPython, $ApiKey
 Start-Sleep -Seconds 3
 
 # --- 2. Mock data feed ---
-Write-Host "Starting mock data replay (speedup=${MockSpeedup}x) ..."
-Start-Process powershell -ArgumentList @(
-    "-NoExit", "-Command",
-    "cd '$RepoRoot\bridge'; `$env:MODE='mock'; `$env:AGRITWIN_API_KEY='$ApiKey'; `$env:AGRITWIN_BACKEND_URL='http://127.0.0.1:8000'; `$env:MOCK_SPEEDUP='$MockSpeedup'; & '$VenvPython' mock_source.py"
-)
+$jobs += Start-Job -Name "mock" -ScriptBlock {
+    param($RepoRoot, $VenvPython, $ApiKey, $MockSpeedup)
+    Set-Location "$RepoRoot\bridge"
+    $env:MODE = "mock"
+    $env:AGRITWIN_API_KEY = $ApiKey
+    $env:AGRITWIN_BACKEND_URL = "http://127.0.0.1:8000"
+    $env:MOCK_SPEEDUP = "$MockSpeedup"
+    & $VenvPython mock_source.py 2>&1
+} -ArgumentList $RepoRoot, $VenvPython, $ApiKey, $MockSpeedup
 Start-Sleep -Seconds 2
 
 # --- 3. Chat UI ---
-$ChatEnv = "`$env:AGRITWIN_API_KEY='$ApiKey'; `$env:AGRITWIN_BACKEND_URL='http://127.0.0.1:8000';"
 if ($RealAgent) {
-    Write-Host "Starting chat UI in REAL mode on http://127.0.0.1:8001 (will call Claude) ..."
-    $ChatEnv += " `$env:USE_REAL_AGENT='true'; `$env:ANTHROPIC_API_KEY='$AnthropicApiKey';"
+    Write-Host "Chat UI will start in REAL mode (calls Claude) ..."
 } else {
-    Write-Host "Starting chat UI in STUB mode on http://127.0.0.1:8001 ..."
+    Write-Host "Chat UI will start in STUB mode ..."
 }
-Start-Process powershell -ArgumentList @(
-    "-NoExit", "-Command",
-    "cd '$RepoRoot\chat'; $ChatEnv & '$VenvPython' -m uvicorn chat_app:app --reload --port 8001"
-)
+$jobs += Start-Job -Name "chat" -ScriptBlock {
+    param($RepoRoot, $VenvPython, $ApiKey, $RealAgent, $OpenRouterApiKey)
+    Set-Location "$RepoRoot\chat"
+    $env:AGRITWIN_API_KEY = $ApiKey
+    $env:AGRITWIN_BACKEND_URL = "http://127.0.0.1:8000"
+    if ($RealAgent) {
+        $env:USE_REAL_AGENT = "true"
+        $env:OPENROUTER_API_KEY = $OpenRouterApiKey
+    }
+    & $VenvPython -m uvicorn chat_app:app --reload --port 8001 2>&1
+} -ArgumentList $RepoRoot, $VenvPython, $ApiKey, $RealAgent, $OpenRouterApiKey
 Start-Sleep -Seconds 3
 
 Write-Host ""
-Write-Host "All three windows are up:"
-Write-Host "  Backend state: http://localhost:8000/api/v1/state"
-Write-Host "  Chat UI:       http://127.0.0.1:8001"
+Write-Host "Backend state: http://localhost:8000/api/v1/state"
+Write-Host "Chat UI:       http://127.0.0.1:8001"
 Write-Host ""
-Write-Host "Close a window (or Ctrl+C inside it) to stop that piece independently."
+Write-Host "Streaming logs below, prefixed [backend]/[mock]/[chat]. Ctrl+C stops all three."
+Write-Host ""
 
 Start-Process "http://127.0.0.1:8001"
+
+try {
+    while ($jobs | Where-Object { $_.State -eq "Running" }) {
+        foreach ($job in $jobs) {
+            Receive-Job -Job $job | ForEach-Object { Write-Host "[$($job.Name)] $_" }
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    # Drain anything left after a job exits on its own.
+    foreach ($job in $jobs) {
+        Receive-Job -Job $job | ForEach-Object { Write-Host "[$($job.Name)] $_" }
+    }
+}
+finally {
+    Write-Host ""
+    Write-Host "Stopping all jobs..."
+    $jobs | Stop-Job -ErrorAction SilentlyContinue
+    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+}
