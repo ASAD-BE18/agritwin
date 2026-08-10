@@ -6,10 +6,12 @@ A minimal FastAPI page: type a question, get an answer, see exactly which
 MCP tool(s) fired as a visible chip under the reply — the single most
 convincing thing in the demo, per the brief.
 
-STATUS: real-agent mode is implemented (see call_agent_real / lifespan below),
-following the async MCP tool_runner pattern from
-docs/Implementation_Plan.md section 2.1. Defaults to USE_REAL_AGENT=false
-(the stub) since it needs a live ANTHROPIC_API_KEY to actually call Claude.
+STATUS: real-agent mode is implemented (see call_agent_real / lifespan below).
+The MCP side follows docs/Implementation_Plan.md section 2.1 (same
+mcp/mcp_server.py drives this and Claude Desktop/Code); the model call goes
+through OpenRouter (OpenAI-compatible API) instead of a direct Anthropic key,
+using the free "openrouter/free" router model since no Anthropic key is
+available for this project. Defaults to USE_REAL_AGENT=false (the stub).
 
 Run:
     uvicorn chat_app:app --reload --port 8001
@@ -19,9 +21,11 @@ Env vars:
                           "<this process's own interpreter> <repo>/mcp/mcp_server.py"
                           -- both resolved from this file's own location/venv,
                           not the process's cwd or whatever "python" is on PATH
-    ANTHROPIC_API_KEY    required only when USE_REAL_AGENT=true
+    OPENROUTER_API_KEY   required only when USE_REAL_AGENT=true
+    OPENROUTER_MODEL      OpenRouter model slug, default "openrouter/free"
 """
 
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -29,6 +33,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from tool_names import (
@@ -53,9 +58,20 @@ USE_REAL_AGENT = os.environ.get("USE_REAL_AGENT", "false").lower() == "true"
 _DEFAULT_MCP_SERVER_PATH = Path(__file__).resolve().parent.parent / "mcp" / "mcp_server.py"
 MCP_SERVER_CMD = os.environ.get("MCP_SERVER_CMD", f"{sys.executable} {_DEFAULT_MCP_SERVER_PATH}")
 
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
+MAX_TOOL_ITERATIONS = 8
+
 # Holds the long-lived MCP client session (only used in real mode) so we
 # connect once at startup instead of spawning mcp_server.py per request.
 mcp_session = {"session": None}
+
+# Only instantiate in real mode -- avoids requiring OPENROUTER_API_KEY to even
+# be set when running in stub mode.
+openrouter_client = (
+    AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY"))
+    if USE_REAL_AGENT
+    else None
+)
 
 
 @asynccontextmanager
@@ -110,49 +126,61 @@ def call_agent_stub(question: str):
 
 async def call_agent_real(question: str):
     """
-    Follows docs/Implementation_Plan.md section 2.1: the same MCP server
-    (mcp/mcp_server.py, spawned once at startup by lifespan()) drives both
-    this chat UI and Claude Desktop/Code.
+    Follows docs/Implementation_Plan.md section 2.1 on the MCP side: the same
+    MCP server (mcp/mcp_server.py, spawned once at startup by lifespan())
+    drives both this chat UI and Claude Desktop/Code.
 
-    Collects tool_use names from every message the runner yields (tool calls
-    happen in intermediate turns), but takes the final answer text only from
-    the *last* yielded message rather than concatenating text across every
-    turn -- summing text blocks across turns would duplicate any "let me
-    check that" narration a multi-tool-call turn produces.
+    The model call itself goes through OpenRouter's OpenAI-compatible chat
+    completions API rather than Anthropic's tool_runner -- tool_runner is an
+    Anthropic-SDK-specific helper with no OpenRouter equivalent, so the same
+    "offer tools, execute what the model calls, feed results back" loop is
+    driven by hand here instead.
     """
-    from anthropic import AsyncAnthropic
-    from anthropic.lib.tools.mcp import async_mcp_tool
-
     session = mcp_session["session"]
-    tools = (await session.list_tools()).tools
+    mcp_tools = (await session.list_tools()).tools
+    openai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description or "",
+                "parameters": t.input_schema,
+            },
+        }
+        for t in mcp_tools
+    ]
 
-    client = AsyncAnthropic()
-    runner = client.beta.messages.tool_runner(
-        model="claude-opus-5",
-        max_tokens=4096,
-        output_config={"effort": "low"},
-        system=GROUNDING_SYSTEM_PROMPT,
-        tools=[async_mcp_tool(t, session) for t in tools],
-        messages=[{"role": "user", "content": question}],
-    )
+    messages = [
+        {"role": "system", "content": GROUNDING_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
 
     tools_called = []
-    last_message = None
-    async for message in runner:
-        last_message = message
-        for block in getattr(message, "content", []):
-            if getattr(block, "type", None) == "tool_use":
-                tools_called.append(block.name)
-
-    final_text = ""
-    if last_message is not None:
-        final_text = "".join(
-            block.text
-            for block in getattr(last_message, "content", [])
-            if getattr(block, "type", None) == "text"
+    for _ in range(MAX_TOOL_ITERATIONS):
+        response = await openrouter_client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=messages,
+            tools=openai_tools,
         )
+        message = response.choices[0].message
+        if not message.tool_calls:
+            return message.content or "", tools_called
 
-    return final_text, tools_called
+        messages.append(message.model_dump(exclude_unset=True))
+        for call in message.tool_calls:
+            tools_called.append(call.function.name)
+            args = json.loads(call.function.arguments or "{}")
+            result = await session.call_tool(call.function.name, args)
+            result_text = "".join(
+                block.text for block in result.content if getattr(block, "type", None) == "text"
+            )
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": result_text,
+            })
+
+    raise RuntimeError(f"exceeded {MAX_TOOL_ITERATIONS} tool-call iterations without a final answer")
 
 
 def render_chip(name: str) -> str:
@@ -189,7 +217,7 @@ def index():
     mode_banner = "" if USE_REAL_AGENT else (
         '<div style="background:#fff3cd;padding:8px;border-radius:6px;margin-bottom:12px;">'
         'Running in STUB mode — answers are placeholders. '
-        'Set ANTHROPIC_API_KEY and USE_REAL_AGENT=true to talk to the real model.</div>'
+        'Set OPENROUTER_API_KEY and USE_REAL_AGENT=true to talk to the real model.</div>'
     )
     return f"""
 <!DOCTYPE html>
