@@ -29,19 +29,35 @@ What changed from v3:
     matching Urdu placeholder text. Tool names in the "grounded on" log
     stay in English deliberately — they're technical identifiers.
 
+The MCP side follows docs/Implementation_Plan.md section 2.1 (same
+mcp/mcp_server.py drives this and Claude Desktop/Code); the model call goes
+through OpenRouter (OpenAI-compatible API) instead of a direct Anthropic key,
+using the free "openrouter/free" router model since no Anthropic key is
+available for this project.
+
 Run:
     uvicorn chat_app:app --reload --port 8001
+Env vars:
+    USE_REAL_AGENT      "true"/"false", default false
+    MCP_SERVER_CMD       command to launch mcp/mcp_server.py, default:
+                          "<this process's own interpreter> <repo>/mcp/mcp_server.py"
+                          -- both resolved from this file's own location/venv,
+                          not the process's cwd or whatever "python" is on PATH
+    OPENROUTER_API_KEY   required only when USE_REAL_AGENT=true
+    OPENROUTER_MODEL      OpenRouter model slug, default "openrouter/free"
 """
 
+import json
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from anthropic import AsyncAnthropic
-from anthropic.lib.tools.mcp import async_mcp_tool
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 
@@ -55,10 +71,24 @@ from tool_names import (
 )
 
 USE_REAL_AGENT = os.environ.get("USE_REAL_AGENT", "false").lower() == "true"
-MCP_SERVER_CMD = os.environ.get("MCP_SERVER_CMD", "python ../mcp/mcp_server.py")
 
+# Both pieces resolved from this process's own state, not assumed:
+#   - the script path is relative to this file's location, not the process's
+#     cwd (a hardcoded "../mcp/mcp_server.py" would break the moment uvicorn
+#     is launched from anywhere other than this exact directory);
+#   - the interpreter is sys.executable (this venv), not a bare "python" --
+#     that resolves via PATH and can silently pick a different Python with
+#     none of this project's dependencies installed (found by testing this:
+#     it picked a system Python missing python-dotenv).
+_DEFAULT_MCP_SERVER_PATH = Path(__file__).resolve().parent.parent / "mcp" / "mcp_server.py"
+MCP_SERVER_CMD = os.environ.get("MCP_SERVER_CMD", f"{sys.executable} {_DEFAULT_MCP_SERVER_PATH}")
+
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
+MAX_TOOL_ITERATIONS = 8
+
+# Holds the long-lived MCP client session (only used in real mode) so we
+# connect once at startup instead of spawning mcp_server.py per request.
 mcp_session = {"session": None}
-anthropic_client = AsyncAnthropic() if USE_REAL_AGENT else None
 
 LANGUAGE_NAMES = {"en": "English", "ur": "Urdu"}
 
@@ -126,6 +156,14 @@ STUB_ANSWERS = {
     },
 }
 
+# Only instantiate in real mode -- avoids requiring OPENROUTER_API_KEY to even
+# be set when running in stub mode.
+openrouter_client = (
+    AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY"))
+    if USE_REAL_AGENT
+    else None
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -170,6 +208,17 @@ def call_agent_stub(question: str, lang: str):
 
 
 async def call_agent_real(question: str, lang: str):
+    """
+    Follows docs/Implementation_Plan.md section 2.1 on the MCP side: the same
+    MCP server (mcp/mcp_server.py, spawned once at startup by lifespan())
+    drives both this chat UI and Claude Desktop/Code.
+
+    The model call itself goes through OpenRouter's OpenAI-compatible chat
+    completions API rather than Anthropic's tool_runner -- tool_runner is an
+    Anthropic-SDK-specific helper with no OpenRouter equivalent, so the same
+    "offer tools, execute what the model calls, feed results back" loop is
+    driven by hand here instead.
+    """
     session = mcp_session["session"]
     if session is None:
         raise RuntimeError(
@@ -177,41 +226,76 @@ async def call_agent_real(question: str, lang: str):
             "USE_REAL_AGENT=true with the app's lifespan startup."
         )
 
-    tools = (await session.list_tools()).tools
+    mcp_tools = (await session.list_tools()).tools
+    openai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description or "",
+                "parameters": t.input_schema,
+            },
+        }
+        for t in mcp_tools
+    ]
 
     system_prompt = GROUNDING_SYSTEM_PROMPT
     if lang != "en":
         lang_name = LANGUAGE_NAMES.get(lang, lang)
         system_prompt += f" Respond in {lang_name}, regardless of the language of the tool data."
 
-    runner = anthropic_client.beta.messages.tool_runner(
-        model="claude-opus-5",
-        max_tokens=4096,
-        output_config={"effort": "low"},
-        system=system_prompt,
-        tools=[async_mcp_tool(t, session) for t in tools],
-        messages=[{"role": "user", "content": question}],
-    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
+    ]
 
     tools_called = []
-    final_text = ""
-    async for message in runner:
-        for block in getattr(message, "content", []):
-            if getattr(block, "type", None) == "tool_use":
-                tools_called.append(block.name)
-            if getattr(block, "type", None) == "text":
-                final_text += block.text
+    for _ in range(MAX_TOOL_ITERATIONS):
+        response = await openrouter_client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=messages,
+            tools=openai_tools,
+        )
+        message = response.choices[0].message
+        if not message.tool_calls:
+            return message.content or "", tools_called
 
-    return final_text, tools_called
+        messages.append(message.model_dump(exclude_unset=True))
+        for call in message.tool_calls:
+            tools_called.append(call.function.name)
+            args = json.loads(call.function.arguments or "{}")
+            result = await session.call_tool(call.function.name, args)
+            result_text = "".join(
+                block.text for block in result.content if getattr(block, "type", None) == "text"
+            )
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": result_text,
+            })
+
+    raise RuntimeError(f"exceeded {MAX_TOOL_ITERATIONS} tool-call iterations without a final answer")
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     lang = req.lang if req.lang in ("en", "ur") else "en"
-    if USE_REAL_AGENT:
-        answer, tools_called = await call_agent_real(req.message, lang)
-    else:
+    if not USE_REAL_AGENT:
         answer, tools_called = call_agent_stub(req.message, lang)
+        return {"reply": answer, "tools_called": tools_called}
+
+    try:
+        answer, tools_called = await call_agent_real(req.message, lang)
+    except Exception as exc:
+        # Matches the plan's own failure-drill requirement (Implementation_Plan.md
+        # §6): "kill the LLM API -- does the UI degrade cleanly, or throw?" A raw
+        # 500 here would fail that drill. Per the grounding system prompt's own
+        # rule ("if a tool fails, say so -- do not estimate"), say so rather than
+        # returning a fabricated answer.
+        return {
+            "reply": f"(unavailable) Could not reach the AI service: {exc}",
+            "tools_called": [],
+        }
     return {"reply": answer, "tools_called": tools_called}
 
 

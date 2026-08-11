@@ -42,12 +42,33 @@ Talk to Asad before you finalize this — his backend code parses exactly this f
 
 ## You don't need to wait for the hardware kit to start
 
-Use **Wokwi** (wokwi.com — free, runs in a browser, no signup required for basic use): it simulates an Arduino Uno with a DS18B20 sensor and an L298N driver already built in. You can write your real firmware code against it, and there's a slider in the simulator to fake the temperature going high — so you can test that the safety cutoff actually trips *before* you ever touch a real heater. Write and test everything there first.
+The safety logic and serial protocol live in `firmware/common/AgriTwinCore.cpp`, shared by
+the one real-hardware build target (`firmware/agritwin_hardware/`). You can compile it
+without any hardware or simulator attached to at least catch build errors early:
+
+```
+cd firmware/agritwin_hardware
+arduino-cli compile --fqbn arduino:avr:uno --libraries .. --output-dir build agritwin_hardware.ino
+```
+
+For actually *exercising* the safety cutoff (dragging a fake temperature up and watching
+the heater turn itself off) before real hardware arrives, your best option is still a
+Wokwi circuit (wokwi.com, free, no signup for basic use) — we don't ship a pre-built one
+anymore (the earlier attempt kept fighting us on part wiring/layout with no real payoff),
+so you'd wire up your own Arduino Uno + DS18B20 project there and paste in
+`agritwin_hardware.ino` + the `common/` files as extra tabs. Not required to start, but
+worth doing before you'd ever trust the cutoff on a real heater.
+
+Separately, there's `firmware/web_sim/` — a browser page that stands in for the whole rig
+(temperature slider, fan/heater visuals) and feeds the backend directly. That's for
+demoing the *rest* of the system (Unity, chat, dashboards) with zero hardware — it
+reimplements the safety rule in JS for the visuals, it does not run your actual firmware
+code, so it doesn't substitute for compiling and testing your C++.
 
 ## How you'll know it's done
 
-- [ ] Firmware compiles without errors.
-- [ ] In Wokwi (or on real hardware once it arrives): drag the temperature up past the safe threshold — heater turns off and fan goes to 100%, on its own, without you sending any command.
+- [ ] Firmware compiles without errors (`arduino-cli compile`, see above).
+- [ ] On real hardware (or your own Wokwi circuit): drag/heat the temperature up past the safe threshold — heater turns off and fan goes to 100%, on its own, without you sending any command.
 - [ ] Disconnect the sensor — heater turns off.
 - [ ] Stop sending messages from the laptop side for 5+ seconds — heater turns off.
 - [ ] These three checks pass **before** the heater is ever left running unattended with real hardware.
