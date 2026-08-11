@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AgriTwin — Web Rig Simulator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>AgriTwin — Web Rig Simulator</h1>
+    <p>Stands in for the physical greenhouse rig (sensor + fan + heater) while there's no hardware to run against. Sends readings straight to the backend's <code>/api/v1/ingest</code>, same as a real device would.</p>
+  </header>
+
+  <section id="banner" class="banner" hidden>
+    ⚠ SAFETY CUTOFF ACTIVE — heater forced off, fan forced to 100%
+  </section>
+
+  <figure class="panel diagram-panel">
+    <h2>Rig layout</h2>
+    <!-- Wiring mirrors the real sketches, not just the sim: pin numbers come from
+         firmware/common/AgriTwinCore.cpp (D2 one-wire) and
+         firmware/agritwin_hardware/HardwareActuators.cpp (D9/D8/D7 fan, D6 heater).
+         Keep them in step if either file's pin map changes.
+
+         Routing rules used throughout, so the picture stays readable as it grows:
+           - signals run left to right in horizontal lanes, one lane per pin;
+           - the 12 V rail is the only thing that ever hops, and it hops over signals;
+           - grounds are net labels (ground symbols), not drawn wires -- drawing them
+             would triple the wire count for no extra information. -->
+    <svg id="rigDiagram" viewBox="0 0 1080 700" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-label="Wiring schematic: a host laptop on USB to an Arduino Uno; D2 carries one-wire data to a DS18B20 probe with a 4.7 kilo-ohm pull-up, D9 D8 and D7 drive an L298N motor driver feeding a 12 volt fan, and D6 drives a relay or MOSFET module switching a PTC heater. The fan, heater, probe and plant sit inside a greenhouse enclosure, and a 12 volt supply feeds both driver modules over a shared rail with grounds tied to the Arduino.">
+      <defs>
+        <marker id="airArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="airflow-head" />
+        </marker>
+      </defs>
+
+      <!-- ---------- Greenhouse enclosure ---------- -->
+      <path d="M 680 130 L 865 78 L 1050 130" class="gh-roof" />
+      <rect x="680" y="130" width="370" height="510" rx="6" class="gh-wall" />
+      <text x="865" y="66" text-anchor="middle" class="dia-label">Greenhouse box (rig enclosure)</text>
+      <line x1="692" y1="628" x2="1038" y2="628" class="gh-floor" />
+
+      <!-- ---------- Host laptop + USB ---------- -->
+      <g transform="translate(75,20)">
+        <rect x="0" y="0" width="130" height="72" rx="5" class="laptop-lid" />
+        <rect x="8" y="8" width="114" height="56" rx="3" class="laptop-screen" />
+        <path d="M -12 72 L 142 72 L 152 82 L -22 82 Z" class="laptop-base" />
+        <text x="65" y="38" text-anchor="middle" class="dia-pin laptop-text">host laptop</text>
+      </g>
+      <path d="M 135 102 V 116" class="wire wire-usb" />
+      <text x="172" y="106" class="dia-note">USB &#183; 9600 baud &#8212; telemetry every 500 ms</text>
+      <text x="172" y="120" class="dia-note">T:&#8230;,F:&#8230;,H:&#8230;,S:&#8230;,W:&#8230;</text>
+
+      <!-- ---------- Arduino Uno ---------- -->
+      <g transform="translate(90,140)">
+        <rect x="0" y="0" width="180" height="330" rx="10" class="arduino-board" />
+        <rect x="18" y="-24" width="54" height="26" rx="3" class="arduino-usb" />
+        <rect x="24" y="-18" width="42" height="14" rx="2" class="arduino-usb-inner" />
+        <rect x="112" y="-20" width="52" height="22" rx="5" class="arduino-jack" />
+
+        <rect x="16" y="18" width="20" height="20" rx="3" class="arduino-reset" />
+        <text x="26" y="50" text-anchor="middle" class="dia-pin dim">RESET</text>
+
+        <rect x="16" y="62" width="10" height="6" rx="1" class="led led-on" />
+        <text x="32" y="68" class="dia-pin dim">ON</text>
+        <rect x="16" y="78" width="10" height="6" rx="1" class="led led-l" />
+        <text x="32" y="84" class="dia-pin dim">L</text>
+
+        <!-- ATmega328P -- sits below the power-header labels (VIN is at y=314 absolute) -->
+        <rect x="40" y="180" width="80" height="76" rx="3" class="mcu" />
+        <circle cx="80" cy="188" r="4" class="mcu-notch" />
+        <text x="80" y="226" text-anchor="middle" class="dia-pin mcu-text">ATmega</text>
+        <text x="80" y="238" text-anchor="middle" class="dia-pin mcu-text">328P</text>
+        <g class="mcu-leg">
+          <path d="M 40 196 h -6 M 40 210 h -6 M 40 224 h -6 M 40 238 h -6 M 40 250 h -6" />
+          <path d="M 120 196 h 6 M 120 210 h 6 M 120 224 h 6 M 120 238 h 6 M 120 250 h 6" />
+        </g>
+
+        <!-- ICSP -->
+        <g class="icsp">
+          <circle cx="44" cy="282" r="2.5" /><circle cx="54" cy="282" r="2.5" /><circle cx="64" cy="282" r="2.5" />
+          <circle cx="44" cy="292" r="2.5" /><circle cx="54" cy="292" r="2.5" /><circle cx="64" cy="292" r="2.5" />
+        </g>
+        <text x="80" y="292" class="dia-pin dim">ICSP</text>
+
+        <text x="72" y="100" text-anchor="middle" class="dia-label board-label">Arduino Uno</text>
+
+        <!-- Digital header (right edge): D13 at top down to D0 -->
+        <rect x="168" y="22" width="16" height="286" rx="2" class="header-strip" />
+        <rect x="-2" y="95" width="16" height="90" rx="2" class="header-strip" />
+      </g>
+
+      <!-- Digital pins, absolute coords: D13 y=170 .. D0 y=430, 20px pitch -->
+      <g class="pin-row">
+        <rect x="262" y="166" width="8" height="8" class="pin" /><text x="248" y="174" text-anchor="end" class="dia-pin dim">D13</text>
+        <rect x="262" y="186" width="8" height="8" class="pin" /><text x="248" y="194" text-anchor="end" class="dia-pin dim">D12</text>
+        <rect x="262" y="206" width="8" height="8" class="pin" /><text x="248" y="214" text-anchor="end" class="dia-pin dim">D11 ~</text>
+        <rect x="262" y="226" width="8" height="8" class="pin" /><text x="248" y="234" text-anchor="end" class="dia-pin dim">D10 ~</text>
+        <rect x="262" y="246" width="8" height="8" class="pin pin-fan" /><text x="248" y="254" text-anchor="end" class="dia-pin used">D9 ~</text>
+        <rect x="262" y="266" width="8" height="8" class="pin pin-fan" /><text x="248" y="274" text-anchor="end" class="dia-pin used">D8</text>
+        <rect x="262" y="286" width="8" height="8" class="pin pin-fan" /><text x="248" y="294" text-anchor="end" class="dia-pin used">D7</text>
+        <rect x="262" y="306" width="8" height="8" class="pin pin-heater" /><text x="248" y="314" text-anchor="end" class="dia-pin used">D6 ~</text>
+        <rect x="262" y="326" width="8" height="8" class="pin" /><text x="248" y="334" text-anchor="end" class="dia-pin dim">D5 ~</text>
+        <rect x="262" y="346" width="8" height="8" class="pin" /><text x="248" y="354" text-anchor="end" class="dia-pin dim">D4</text>
+        <rect x="262" y="366" width="8" height="8" class="pin" /><text x="248" y="374" text-anchor="end" class="dia-pin dim">D3 ~</text>
+        <rect x="262" y="386" width="8" height="8" class="pin pin-sensor" /><text x="248" y="394" text-anchor="end" class="dia-pin used">D2</text>
+        <rect x="262" y="406" width="8" height="8" class="pin" /><text x="248" y="414" text-anchor="end" class="dia-pin dim">D1</text>
+        <rect x="262" y="426" width="8" height="8" class="pin" /><text x="248" y="434" text-anchor="end" class="dia-pin dim">D0</text>
+      </g>
+
+      <!-- Power header (left edge) -- 5V and GND leave as net labels, not drawn wires -->
+      <g class="pin-row">
+        <rect x="92" y="246" width="8" height="8" class="pin pin-power" /><text x="110" y="254" class="dia-pin used">5V</text>
+        <rect x="92" y="276" width="8" height="8" class="pin" /><text x="110" y="284" class="dia-pin used">GND</text>
+        <rect x="92" y="306" width="8" height="8" class="pin" /><text x="110" y="314" class="dia-pin dim">VIN</text>
+      </g>
+      <path d="M 92 250 H 62" class="wire wire-net" />
+      <text x="58" y="253" text-anchor="end" class="dia-pin">5 V</text>
+      <path d="M 92 280 H 62" class="wire wire-net" />
+      <g class="gnd" transform="translate(62,280)">
+        <path d="M 0 -7 V 7 M 0 0 h -9 M -2 4 h -5 M -3 8 h -3" />
+      </g>
+
+      <!-- ---------- L298N motor driver ---------- -->
+      <rect x="420" y="205" width="200" height="130" rx="8" class="module-body" />
+      <text x="520" y="226" text-anchor="middle" class="dia-title">L298N motor driver</text>
+      <g class="heatsink">
+        <rect x="516" y="240" width="54" height="26" rx="2" />
+        <path d="M 526 240 v 26 M 538 240 v 26 M 550 240 v 26 M 562 240 v 26" />
+      </g>
+      <g class="pin-row">
+        <rect x="414" y="235" width="12" height="10" rx="2" class="terminal terminal-fan" /><text x="432" y="244" class="dia-pin used">ENA</text>
+        <rect x="414" y="265" width="12" height="10" rx="2" class="terminal terminal-fan" /><text x="432" y="274" class="dia-pin used">IN1</text>
+        <rect x="414" y="295" width="12" height="10" rx="2" class="terminal terminal-fan" /><text x="432" y="304" class="dia-pin used">IN2</text>
+        <rect x="614" y="240" width="12" height="10" rx="2" class="terminal terminal-fan" /><text x="608" y="249" text-anchor="end" class="dia-pin used">OUT1</text>
+        <rect x="614" y="290" width="12" height="10" rx="2" class="terminal terminal-fan" /><text x="608" y="299" text-anchor="end" class="dia-pin used">OUT2</text>
+        <rect x="464" y="330" width="12" height="10" rx="2" class="terminal terminal-power" /><text x="470" y="326" text-anchor="middle" class="dia-pin used">12V</text>
+        <rect x="514" y="330" width="12" height="10" rx="2" class="terminal" /><text x="520" y="326" text-anchor="middle" class="dia-pin used">GND</text>
+      </g>
+      <text x="520" y="316" text-anchor="middle" class="dia-note">IN1 HIGH / IN2 LOW &#8212; one direction</text>
+      <g class="gnd" transform="translate(520,346)">
+        <path d="M 0 -6 V 4 M -9 4 h 18 M -6 8 h 12 M -3 12 h 6" />
+      </g>
+
+      <!-- ---------- Relay / MOSFET (heater switch) ---------- -->
+      <rect x="420" y="385" width="200" height="90" rx="8" class="module-body" />
+      <text x="520" y="404" text-anchor="middle" class="dia-title">Relay / MOSFET</text>
+      <g class="relay-glyph">
+        <rect x="536" y="414" width="22" height="26" rx="2" />
+        <path d="M 536 420 h 22 M 536 428 h 22 M 536 434 h 22" />
+        <path d="M 566 438 L 592 420" />
+        <circle cx="566" cy="438" r="2.5" />
+        <circle cx="594" cy="418" r="2.5" />
+      </g>
+      <g class="pin-row">
+        <rect x="414" y="410" width="12" height="10" rx="2" class="terminal terminal-heater" /><text x="432" y="419" class="dia-pin used">IN</text>
+        <rect x="614" y="425" width="12" height="10" rx="2" class="terminal terminal-heater" /><text x="608" y="434" text-anchor="end" class="dia-pin used">OUT+</text>
+        <rect x="464" y="470" width="12" height="10" rx="2" class="terminal terminal-power" /><text x="470" y="466" text-anchor="middle" class="dia-pin used">12V</text>
+        <rect x="514" y="470" width="12" height="10" rx="2" class="terminal" /><text x="520" y="466" text-anchor="middle" class="dia-pin used">GND</text>
+      </g>
+      <g class="gnd" transform="translate(520,486)">
+        <path d="M 0 -6 V 4 M -9 4 h 18 M -6 8 h 12 M -3 12 h 6" />
+      </g>
+
+      <!-- ---------- 12 V supply ---------- -->
+      <rect x="90" y="595" width="210" height="70" rx="8" class="psu-body" />
+      <text x="195" y="626" text-anchor="middle" class="dia-title">12 V supply</text>
+      <text x="195" y="642" text-anchor="middle" class="dia-note">actuator rail only</text>
+      <g class="pin-row">
+        <rect x="244" y="590" width="12" height="10" rx="2" class="terminal terminal-power" /><text x="264" y="588" class="dia-pin used">+12 V</text>
+        <rect x="194" y="590" width="12" height="10" rx="2" class="terminal" />
+      </g>
+      <path d="M 200 590 V 578" class="wire wire-net" />
+      <g class="gnd" transform="translate(200,578)">
+        <path d="M 0 -6 V 0 M -9 0 h 18 M -6 4 h 12 M -3 8 h 6" />
+      </g>
+
+      <!-- ---------- Wiring ----------
+           Signal lanes (one per pin), then the 12 V rail. The two arcs are wire
+           hops: the rail crosses a signal there and does not connect to it. -->
+
+      <!-- D9 -> ENA (PWM), D8 -> IN1, D7 -> IN2 -->
+      <path d="M 270 250 H 340 V 240 H 420" class="wire wire-fan" />
+      <path d="M 270 270 H 420" class="wire wire-fan" />
+      <path d="M 270 290 H 350 V 300 H 420" class="wire wire-fan" />
+      <text x="344" y="232" class="dia-note">analogWrite 0&#8211;255</text>
+
+      <!-- D6 -> heater switch input -->
+      <path d="M 270 310 H 368 V 415 H 420" class="wire wire-heater" />
+      <text x="376" y="336" class="dia-note">HIGH = heat</text>
+
+      <!-- D2 -> DS18B20 data. Drops to floor level and runs in behind the pot, so it
+           reads as a cable lying on the greenhouse floor rather than crossing the plant. -->
+      <path d="M 270 390 H 320 V 620 H 985 V 518" class="wire wire-sensor" />
+      <text x="436" y="612" class="dia-note">1-Wire data (D2)</text>
+
+      <!-- L298N outputs -> fan leads -->
+      <path d="M 620 245 H 726" class="wire wire-fan" />
+      <path d="M 620 295 H 700 V 258 H 726" class="wire wire-fan" />
+
+      <!-- Heater switch output -> PTC heater. Enters left of centre so it stays clear
+           of the flame and the rising-heat waves above the block. -->
+      <path d="M 620 430 H 705 V 450" class="wire wire-heater" />
+
+      <!-- 12 V rail: PSU -> heater switch, branch -> L298N. Both arcs are hops. -->
+      <path d="M 250 590 V 520 H 308 A 12 12 0 0 1 332 520 H 470 V 470" class="wire wire-power" />
+      <path d="M 400 520 V 427 A 12 12 0 0 1 400 403 V 350 H 470 V 330" class="wire wire-power" />
+      <circle cx="400" cy="520" r="4" class="junction junction-power" />
+      <text x="352" y="570" class="dia-note">12 V rail &#8212; grounds tied to Arduino GND</text>
+
+      <!-- ---------- Fan (inside the greenhouse) ---------- -->
+      <g transform="translate(780,240)">
+        <rect x="-46" y="-46" width="92" height="92" rx="8" class="fan-frame" />
+        <circle r="40" class="fan-housing" />
+        <circle cx="-36" cy="-36" r="3" class="fan-screw" />
+        <circle cx="36" cy="-36" r="3" class="fan-screw" />
+        <circle cx="-36" cy="36" r="3" class="fan-screw" />
+        <circle cx="36" cy="36" r="3" class="fan-screw" />
+        <rect x="-54" y="-8" width="12" height="30" rx="2" class="fan-pad" />
+        <g id="fanBladeGroup">
+          <ellipse cx="0" cy="-16" rx="7" ry="17" class="fan-blade" />
+          <ellipse cx="0" cy="16" rx="7" ry="17" class="fan-blade" />
+          <ellipse cx="-16" cy="0" rx="17" ry="7" class="fan-blade" />
+          <ellipse cx="16" cy="0" rx="17" ry="7" class="fan-blade" />
+          <circle r="5" class="fan-hub" />
+        </g>
+        <text x="0" y="66" text-anchor="middle" class="dia-label">12 V fan</text>
+        <text x="0" y="82" text-anchor="middle" class="dia-note">PWM on ENA</text>
+      </g>
+
+      <!-- Airflow -- aimed down over the plant, which is what the fan is there for.
+           Dashes drift and fade with the commanded fan speed; see --wind-* in app.js. -->
+      <g class="airflow">
+        <path d="M 830 214 Q 934 240 956 302" marker-end="url(#airArrow)" />
+        <path d="M 832 242 Q 906 306 898 420" marker-end="url(#airArrow)" />
+        <path d="M 826 272 Q 856 350 866 470" marker-end="url(#airArrow)" />
+      </g>
+      <text x="962" y="326" class="dia-note airflow-label">airflow</text>
+
+      <!-- ---------- PTC heater ---------- -->
+      <!-- app.js toggles .on here, so the flame, the rising heat and the body glow
+           all follow the one bit of state rather than each carrying their own. -->
+      <g id="heaterGroup" class="heater" transform="translate(745,475)">
+        <path d="M -65 -20 L -45 -20 M -65 20 L -45 20 M -65 -20 L -65 20" class="bracket" />
+        <rect x="-45" y="-25" width="90" height="50" rx="4" class="heater-body" />
+        <g class="heater-fin">
+          <path d="M -30 -25 v 50 M -15 -25 v 50 M 0 -25 v 50 M 15 -25 v 50 M 30 -25 v 50" />
+        </g>
+        <g class="heat-waves">
+          <path d="M -26 -28 q 5 -7 0 -14 q -5 -7 0 -14" />
+          <path d="M 26 -28 q 5 -7 0 -14 q -5 -7 0 -14" />
+        </g>
+        <!-- Wrapper holds the placement so the flicker keyframes are free to use
+             transform without knocking the flame out of position. -->
+        <g transform="translate(0,-32) scale(1.25)">
+          <path d="M 0 -22 C 10 -10 12 2 4 10 C 8 4 6 -2 0 -6 C -6 -2 -8 6 -2 12 C -10 8 -12 -4 -2 -14 Z" class="heater-flame" />
+        </g>
+        <text x="0" y="46" text-anchor="middle" class="dia-label">PTC heater</text>
+        <text x="0" y="62" text-anchor="middle" class="dia-note">on/off only</text>
+      </g>
+
+      <!-- ---------- DS18B20 probe + 4.7k pull-up ----------
+           The pull-up branch sits on the far side of the probe so it stays clear of
+           the plant; 5 V is a net label, matching the Arduino's power header. -->
+      <path d="M 985 545 H 1020" class="wire wire-sensor" />
+      <circle cx="985" cy="545" r="4" class="junction junction-sensor" />
+      <rect x="1014" y="512" width="12" height="34" rx="2" class="resistor" />
+      <path d="M 1020 512 V 498" class="wire wire-sensor" />
+      <path d="M 1011 498 H 1029" class="net-tick" />
+      <text x="1020" y="490" text-anchor="middle" class="dia-pin">5 V</text>
+      <text x="1020" y="564" text-anchor="middle" class="dia-pin">4.7 k&#8486;</text>
+      <g transform="translate(985,470)">
+        <rect x="-9" y="0" width="18" height="48" rx="9" class="probe-body" />
+        <rect x="-5" y="6" width="10" height="14" rx="5" class="probe-tip" />
+        <text x="0" y="-26" text-anchor="middle" class="dia-label">DS18B20</text>
+        <text x="0" y="-12" text-anchor="middle" class="dia-note">at canopy height</text>
+      </g>
+
+      <!-- ---------- Thermometer gauge (live reading) ---------- -->
+      <g transform="translate(990,150)">
+        <text x="0" y="-24" text-anchor="middle" class="dia-label">air temp</text>
+        <text x="0" y="-12" text-anchor="middle" class="dia-note">what the probe reads</text>
+        <!-- Ticks sit where app.js's fill actually lands: the tube's inner span is
+             y 4..52 for the slider's -10..45 range, so y = 52 - 48*(v+10)/55. -->
+        <g class="thermo-scale">
+          <path d="M -14 8 h 5 M -14 26 h 5 M -14 43 h 5" />
+          <text x="-18" y="11" text-anchor="end" class="dia-pin dim">40</text>
+          <text x="-18" y="29" text-anchor="end" class="dia-pin dim">20</text>
+          <text x="-18" y="46" text-anchor="end" class="dia-pin dim">0</text>
+        </g>
+        <rect x="-8" y="0" width="16" height="56" rx="8" class="thermo-tube" />
+        <rect id="thermoTubeFill" x="-5" y="40" width="10" height="16" rx="5" class="thermo-fill-svg" />
+        <circle id="thermoBulb" cx="0" cy="66" r="13" class="thermo-bulb" />
+      </g>
+
+      <!-- Plant (decorative) -- stands on the greenhouse floor in the fan's airflow,
+           level with the probe. Drawn last so the floor cable passes behind the pot.
+           Artwork is pot-bottom-at-origin growing upward, then placed and scaled
+           with a single transform rather than re-plotting new points. -->
+      <g class="plant" transform="translate(880,634) scale(0.85)">
+        <path d="M -20 0 L 20 0 L 12 -30 L -12 -30 Z" class="pot" />
+        <line x1="0" y1="-30" x2="0" y2="-80" class="stem" />
+        <path d="M 0 -60 C -28 -70 -33 -100 -18 -110 C -3 -95 2 -75 0 -60 Z" class="leaf" />
+        <path d="M 0 -70 C 28 -82 34 -110 20 -122 C 4 -105 -2 -85 0 -70 Z" class="leaf" />
+        <path d="M 0 -85 C 0 -105 -13 -125 0 -140 C 13 -125 0 -105 0 -85 Z" class="leaf" />
+      </g>
+    </svg>
+    <p class="legend">
+      <span class="legend-swatch wire-sensor-swatch"></span> 1-Wire sensor data (D2)
+      <span class="legend-swatch wire-fan-swatch"></span> fan PWM + direction (D9/D8/D7)
+      <span class="legend-swatch wire-heater-swatch"></span> heater switching (D6)
+      <span class="legend-swatch wire-power-swatch"></span> 12 V actuator rail
+      <span class="legend-swatch wire-usb-swatch"></span> USB serial to host
+    </p>
+  </figure>
+
+  <main>
+    <section class="panel">
+      <h2>Temperature sensor</h2>
+      <p class="hw-label">Real rig: DS18B20</p>
+      <div class="readout" id="tempReadout">22.0&deg;C</div>
+      <input id="tempSlider" type="range" min="-10" max="45" step="0.5" value="22" />
+    </section>
+
+    <section class="panel">
+      <h2>Fan</h2>
+      <p class="hw-label">Real rig: L298N driver + DC fan</p>
+      <div class="readout" id="fanReadout">0%</div>
+      <label class="sub-label" for="fanSlider">Desired fan speed (operator input)</label>
+      <input id="fanSlider" type="range" min="0" max="100" step="5" value="0" />
+    </section>
+
+    <section class="panel">
+      <h2>Heater</h2>
+      <p class="hw-label">Real rig: PTC heater + relay/MOSFET</p>
+      <div class="readout" id="heaterReadout">OFF</div>
+      <p class="sub-label">Auto thermostat: on below 18&deg;C, off above 26&deg;C — always overridden off by the safety cutoff above 32&deg;C.</p>
+    </section>
+  </main>
+
+  <section class="panel config">
+    <h2>Backend connection</h2>
+    <label>
+      Backend URL
+      <input id="backendUrl" type="text" value="http://localhost:8000" />
+    </label>
+    <label>
+      X-API-Key
+      <input id="apiKey" type="text" placeholder="dev-only-key-change-me (AGRITWIN_API_KEY)" />
+    </label>
+    <div class="controls">
+      <button id="toggleBtn">Start sending</button>
+      <span id="status" class="status">stopped</span>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
