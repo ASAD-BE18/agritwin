@@ -68,11 +68,25 @@ Write-Host "Repo root: $RepoRoot"
 Write-Host "Python:    $VenvPython"
 Write-Host ""
 
+# --- Init: clear any orphaned process from a previous run that didn't get
+# cleaned up (Ctrl+C only stops each job's own host process, not the uvicorn
+# --reload worker it spawned -- see the exit-cleanup block below for the fix
+# on the way out; this covers whatever a previous run already left behind). ---
+foreach ($port in 8000, 8001) {
+    $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    foreach ($conn in $conns) {
+        Write-Host "Port $port is still held by PID $($conn.OwningProcess) from a previous run -- killing it."
+        & "$env:SystemRoot\System32\taskkill.exe" /PID $conn.OwningProcess /T /F 2>&1 | Out-Null
+    }
+}
+
 $jobs = @()
+$jobPids = @{}
 
 # --- 1. Backend ---
 $jobs += Start-Job -Name "backend" -ScriptBlock {
     param($RepoRoot, $VenvPython, $ApiKey)
+    Write-Output "__JOBPID__:$PID"
     Set-Location "$RepoRoot\backend"
     $env:AGRITWIN_API_KEY = $ApiKey
     & $VenvPython -m uvicorn app.main:app --reload 2>&1
@@ -82,6 +96,7 @@ Start-Sleep -Seconds 3
 # --- 2. Mock data feed ---
 $jobs += Start-Job -Name "mock" -ScriptBlock {
     param($RepoRoot, $VenvPython, $ApiKey, $MockSpeedup)
+    Write-Output "__JOBPID__:$PID"
     Set-Location "$RepoRoot\bridge"
     $env:MODE = "mock"
     $env:AGRITWIN_API_KEY = $ApiKey
@@ -99,6 +114,7 @@ if ($RealAgent) {
 }
 $jobs += Start-Job -Name "chat" -ScriptBlock {
     param($RepoRoot, $VenvPython, $ApiKey, $RealAgent, $OpenRouterApiKey)
+    Write-Output "__JOBPID__:$PID"
     Set-Location "$RepoRoot\chat"
     $env:AGRITWIN_API_KEY = $ApiKey
     $env:AGRITWIN_BACKEND_URL = "http://127.0.0.1:8000"
@@ -119,21 +135,36 @@ Write-Host ""
 
 Start-Process "http://127.0.0.1:8001"
 
+function Write-JobOutput {
+    param($Job)
+    Receive-Job -Job $Job | ForEach-Object {
+        if ($_ -match '^__JOBPID__:(\d+)$') {
+            $jobPids[$Job.Name] = [int]$Matches[1]
+        } else {
+            Write-Host "[$($Job.Name)] $_"
+        }
+    }
+}
+
 try {
     while ($jobs | Where-Object { $_.State -eq "Running" }) {
-        foreach ($job in $jobs) {
-            Receive-Job -Job $job | ForEach-Object { Write-Host "[$($job.Name)] $_" }
-        }
+        foreach ($job in $jobs) { Write-JobOutput -Job $job }
         Start-Sleep -Milliseconds 300
     }
     # Drain anything left after a job exits on its own.
-    foreach ($job in $jobs) {
-        Receive-Job -Job $job | ForEach-Object { Write-Host "[$($job.Name)] $_" }
-    }
+    foreach ($job in $jobs) { Write-JobOutput -Job $job }
 }
 finally {
     Write-Host ""
     Write-Host "Stopping all jobs..."
+    # Stop-Job only signals each job's own host process -- it never touches
+    # the uvicorn --reload worker process that host spawned, which is what
+    # was orphaning processes on ports 8000/8001 across runs. Tree-kill the
+    # real process captured via __JOBPID__ instead; Stop-Job/Remove-Job below
+    # is just to clean up the PowerShell job objects themselves.
+    foreach ($name in $jobPids.Keys) {
+        & "$env:SystemRoot\System32\taskkill.exe" /PID $jobPids[$name] /T /F 2>&1 | Out-Null
+    }
     $jobs | Stop-Job -ErrorAction SilentlyContinue
     $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
 }
