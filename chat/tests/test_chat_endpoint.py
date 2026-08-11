@@ -19,7 +19,7 @@ def test_chat_endpoint_degrades_gracefully_when_real_agent_fails(monkeypatch):
     must degrade the UI cleanly, not throw a raw 500."""
     monkeypatch.setattr(chat_app, "USE_REAL_AGENT", True)
 
-    async def failing_agent(question):
+    async def failing_agent(question, lang):
         raise RuntimeError("simulated API outage")
 
     monkeypatch.setattr(chat_app, "call_agent_real", failing_agent)
@@ -36,7 +36,7 @@ def test_chat_endpoint_stub_mode_unaffected_by_real_agent_errors(monkeypatch):
     broken real-agent implementation could break the stub demo path too."""
     monkeypatch.setattr(chat_app, "USE_REAL_AGENT", False)
 
-    async def exploding_agent(question):
+    async def exploding_agent(question, lang):
         raise AssertionError("stub mode must not call call_agent_real")
 
     monkeypatch.setattr(chat_app, "call_agent_real", exploding_agent)
