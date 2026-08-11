@@ -37,9 +37,12 @@ if USE_REAL_AGENT:
     from chat_app import call_agent_real as _real_agent
 
     def call_agent(question):
-        return asyncio.run(_real_agent(question))
+        return asyncio.run(_real_agent(question, "en"))
 else:
-    from chat_app import call_agent_stub as call_agent
+    from chat_app import call_agent_stub as _stub_agent
+
+    def call_agent(question):
+        return _stub_agent(question, "en")
 
 
 # The 5 exact questions from the team brief / Implementation_Plan Step 0.9,

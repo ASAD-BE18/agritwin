@@ -5,6 +5,7 @@ section 2/Step 0.6 and the team brief's 5 test questions.
 Once mcp/mcp_server.py exists, the REAL tool list comes dynamically from
 `await mcp.list_tools()` (see chat_app.py's call_agent_real) — this file only
 matters for the stub agent and the test suite's expected-tool assertions.
+If team changes a tool's name, update it here AND nowhere else in this repo.
 """
 
 GET_CURRENT_CONDITIONS = "get_current_conditions"
@@ -23,7 +24,7 @@ ALL_TOOL_NAMES = [
 
 # Grounding system prompt — verbatim from Implementation_Plan.md Step 0.8.
 # The real agent (call_agent_real) uses this exact prompt; keep it in sync
-# if team refines it.
+# if the team refines it.
 GROUNDING_SYSTEM_PROMPT = (
     "You answer questions about a live greenhouse. Never state a temperature, "
     "timestamp, fan speed, or risk assessment that did not come from a tool "
