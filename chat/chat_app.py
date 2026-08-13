@@ -29,11 +29,12 @@ What changed from v3:
     matching Urdu placeholder text. Tool names in the "grounded on" log
     stay in English deliberately — they're technical identifiers.
 
+STATUS: real-agent mode is implemented (see call_agent_real / lifespan below).
 The MCP side follows docs/Implementation_Plan.md section 2.1 (same
 mcp/mcp_server.py drives this and Claude Desktop/Code); the model call goes
 through OpenRouter (OpenAI-compatible API) instead of a direct Anthropic key,
 using the free "openrouter/free" router model since no Anthropic key is
-available for this project.
+available for this project. Defaults to USE_REAL_AGENT=false (the stub).
 
 Run:
     uvicorn chat_app:app --reload --port 8001
@@ -58,8 +59,20 @@ from fastapi.responses import HTMLResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from mcp import ClientSession
-from mcp.client.stdio import stdio_client, StdioServerParameters
+try:
+    from anthropic import AsyncAnthropic
+    from anthropic.lib.tools.mcp import async_mcp_tool
+except ImportError:  # pragma: no cover - only needed in real-agent mode.
+    AsyncAnthropic = None
+    async_mcp_tool = None
+
+try:
+    from mcp import ClientSession
+    from mcp.client.stdio import stdio_client, StdioServerParameters
+except ImportError:  # pragma: no cover - project installs mcp when real mode is used.
+    ClientSession = None
+    stdio_client = None
+    StdioServerParameters = None
 
 from tool_names import (
     GET_CURRENT_CONDITIONS,
@@ -74,12 +87,8 @@ USE_REAL_AGENT = os.environ.get("USE_REAL_AGENT", "false").lower() == "true"
 
 # Both pieces resolved from this process's own state, not assumed:
 #   - the script path is relative to this file's location, not the process's
-#     cwd (a hardcoded "../mcp/mcp_server.py" would break the moment uvicorn
-#     is launched from anywhere other than this exact directory);
-#   - the interpreter is sys.executable (this venv), not a bare "python" --
-#     that resolves via PATH and can silently pick a different Python with
-#     none of this project's dependencies installed (found by testing this:
-#     it picked a system Python missing python-dotenv).
+#     cwd; and
+#   - the interpreter is sys.executable (this venv), not a bare "python".
 _DEFAULT_MCP_SERVER_PATH = Path(__file__).resolve().parent.parent / "mcp" / "mcp_server.py"
 MCP_SERVER_CMD = os.environ.get("MCP_SERVER_CMD", f"{sys.executable} {_DEFAULT_MCP_SERVER_PATH}")
 
@@ -89,6 +98,7 @@ MAX_TOOL_ITERATIONS = 8
 # Holds the long-lived MCP client session (only used in real mode) so we
 # connect once at startup instead of spawning mcp_server.py per request.
 mcp_session = {"session": None}
+anthropic_client = AsyncAnthropic() if USE_REAL_AGENT and AsyncAnthropic else None
 
 LANGUAGE_NAMES = {"en": "English", "ur": "Urdu"}
 
@@ -167,19 +177,20 @@ openrouter_client = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not USE_REAL_AGENT:
-        yield
+    if USE_REAL_AGENT:
+        if ClientSession is None or stdio_client is None or StdioServerParameters is None:
+            raise RuntimeError("Real-agent mode requires the mcp dependency to be installed.")
+
+        command, *args = MCP_SERVER_CMD.split()
+        params = StdioServerParameters(command=command, args=args)
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                mcp_session["session"] = session
+                yield
         return
 
-    cmd_parts = MCP_SERVER_CMD.split()
-    command, args = cmd_parts[0], cmd_parts[1:]
-    params = StdioServerParameters(command=command, args=args)
-
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            mcp_session["session"] = session
-            yield
+    yield  # stub mode: nothing to start up
 
 
 app = FastAPI(lifespan=lifespan)
@@ -208,17 +219,7 @@ def call_agent_stub(question: str, lang: str):
 
 
 async def call_agent_real(question: str, lang: str):
-    """
-    Follows docs/Implementation_Plan.md section 2.1 on the MCP side: the same
-    MCP server (mcp/mcp_server.py, spawned once at startup by lifespan())
-    drives both this chat UI and Claude Desktop/Code.
-
-    The model call itself goes through OpenRouter's OpenAI-compatible chat
-    completions API rather than Anthropic's tool_runner -- tool_runner is an
-    Anthropic-SDK-specific helper with no OpenRouter equivalent, so the same
-    "offer tools, execute what the model calls, feed results back" loop is
-    driven by hand here instead.
-    """
+    """Use the live MCP tool set and OpenRouter for multi-step tool calls."""
     session = mcp_session["session"]
     if session is None:
         raise RuntimeError(
@@ -263,7 +264,10 @@ async def call_agent_real(question: str, lang: str):
         messages.append(message.model_dump(exclude_unset=True))
         for call in message.tool_calls:
             tools_called.append(call.function.name)
-            args = json.loads(call.function.arguments or "{}")
+            try:
+                args = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
             result = await session.call_tool(call.function.name, args)
             result_text = "".join(
                 block.text for block in result.content if getattr(block, "type", None) == "text"
@@ -280,6 +284,7 @@ async def call_agent_real(question: str, lang: str):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     lang = req.lang if req.lang in ("en", "ur") else "en"
+
     if not USE_REAL_AGENT:
         answer, tools_called = call_agent_stub(req.message, lang)
         return {"reply": answer, "tools_called": tools_called}
@@ -287,15 +292,13 @@ async def chat(req: ChatRequest):
     try:
         answer, tools_called = await call_agent_real(req.message, lang)
     except Exception as exc:
-        # Matches the plan's own failure-drill requirement (Implementation_Plan.md
-        # §6): "kill the LLM API -- does the UI degrade cleanly, or throw?" A raw
-        # 500 here would fail that drill. Per the grounding system prompt's own
-        # rule ("if a tool fails, say so -- do not estimate"), say so rather than
-        # returning a fabricated answer.
+        # Matches the plan's failure-drill requirement: degrade cleanly rather
+        # than surfacing a raw 500 when the downstream AI service is down.
         return {
             "reply": f"(unavailable) Could not reach the AI service: {exc}",
             "tools_called": [],
         }
+
     return {"reply": answer, "tools_called": tools_called}
 
 

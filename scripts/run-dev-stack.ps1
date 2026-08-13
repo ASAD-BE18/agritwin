@@ -80,7 +80,7 @@ if ($RealAgent -and -not $OpenRouterApiKey) {
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$VenvPython = Join-Path $RepoRoot "\backend\.venv\Scripts\python.exe"
 
 if (-not (Test-Path $VenvPython)) {
     Write-Error "Virtualenv not found at $VenvPython -- create it and install each service's dependencies first (see each folder's README)."
